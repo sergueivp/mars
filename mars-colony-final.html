@@ -1185,7 +1185,8 @@ function buildDiagnostics(weaknesses){
 }
 
 function getSelectedMu(ids){
-  return Math.round(ids.reduce((sum,id)=>{
+  const normalized=normalizeSelectedIds(ids);
+  return Math.round(normalized.reduce((sum,id)=>{
     const it=ITEMS.find((x)=>x.id===id);
     return sum+(it?it.mu:0);
   },0)*100)/100;
@@ -1278,6 +1279,7 @@ function buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavato
 }
 
 function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
+  const normalized=normalizeSelectedIds(ids);
   const transportOutcome=getTransportOutcome(muTotal,muBudget);
   return {
     invalid:true,
@@ -1287,24 +1289,25 @@ function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
     failDay:null,failIdx:null,failReason:null,
     pOut:0,pDraw:0,deficit:0,powerAt180:{day:180,pOut:0,pDraw:0,deficit:0,net:0},powerTimeline:[],
     printerCompletedAt:null,excavatorReady:false,habitation:hab,
-    hasSolar:ids.includes(2),hasDust:ids.includes(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:ids.includes(8),hasRepair:ids.includes(13),hasReactor:ids.includes(1),
+    hasSolar:normalized.includes(2),hasDust:normalized.includes(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:normalized.includes(8),hasRepair:normalized.includes(13),hasReactor:normalized.includes(1),
     weakestAreas:['Power stability','Water/oxygen systems'],
     diagnostics:['Fix submission requirements and try again.','Check dependencies and habitation requirements.'],
     tf:transportOutcome.tf,transportStatus:transportOutcome.transportStatus,muTotal,muBudget,muSoftLimit:transportOutcome.softLimit,muOver,
-    oxygenDurationText:ids.includes(9)?'continuous':'until Sol 45',
-    waterDurationText:ids.includes(8)?'continuous':(ids.includes(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
+    oxygenDurationText:normalized.includes(9)?'continuous':'until Sol 45',
+    waterDurationText:normalized.includes(8)?'continuous':(normalized.includes(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
     studentWarnings:[],
     radiationTimeline:[],lsTimeline:[],erTimeline:[],csTimeline:[],keyEvents:[],
   };
 }
 
 function simulate(ids,habitation,budget){
-  const has=id=>ids.includes(id);
+  const normalizedIds=normalizeSelectedIds(ids);
+  const has=id=>normalizedIds.includes(id);
   const hab=(habitation||'surface').toLowerCase();
   const muBudget=Math.max(0.01,parseMu(budget,12));
-  const muTotal=getSelectedMu(ids);
+  const muTotal=getSelectedMu(normalizedIds);
   const muOver=muTotal/muBudget;
-  const uniqueCount=new Set(ids).size;
+  const uniqueCount=normalizedIds.length;
   const validationReasons=[];
   if(uniqueCount!==4) validationReasons.push('Select exactly 4 equipment items');
   if(!habitation) validationReasons.push('Select a habitation strategy');
@@ -1312,7 +1315,7 @@ function simulate(ids,habitation,budget){
   if(hab==='partial' && !(has(4)||has(7))) validationReasons.push('Partial subsurface requires excavator or shielding printer');
   if(hab==='subsurface' && !(has(4)||has(5))) validationReasons.push('Fully subsurface requires excavator or reconnaissance rover');
   if(validationReasons.length){
-    return buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,validationReasons.join(' | '));
+    return buildInvalidSubmission(normalizedIds,hab,muBudget,muTotal,muOver,validationReasons.join(' | '));
   }
 
   const transportOutcome=getTransportOutcome(muTotal,muBudget);
@@ -1350,8 +1353,8 @@ function simulate(ids,habitation,budget){
   const powerTimeline=[];
 
   CHECKPOINTS.forEach((day)=>{
-    const pOut=getCheckpointGeneration(ids,day);
-    const pDraw=getCheckpointDraw(ids,day,hab);
+    const pOut=getCheckpointGeneration(normalizedIds,day);
+    const pDraw=getCheckpointDraw(normalizedIds,day,hab);
     const thermalKW=getHabThermalLoad(hab,has(11));
     const deficit=Math.max(0,Math.round((pDraw-pOut)*100)/100);
     const net=Math.round((pOut-pDraw)*100)/100;
@@ -1368,7 +1371,7 @@ function simulate(ids,habitation,budget){
     const sc={RS:1.0,ES:0.5,EP:1.0,BC:1.0,CS:0.8};
     const weakest=['Power stability','Water/oxygen systems'];
     const diagnostics=buildDiagnostics(weakest);
-    const timelinePack=buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
+    const timelinePack=buildMissionTimelines(normalizedIds,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
     const keyEvents=[{sol:0,type:'launch',outcome:'success'},{sol:0,type:'landing',outcome:'success'},...timelinePack.keyEvents];
     return {
       sc,mv:1.0,viability100:20,resultLabel:'NON-VIABLE',status:'NON-VIABLE',
@@ -1391,7 +1394,7 @@ function simulate(ids,habitation,budget){
   }
 
   let sc={...BASE};
-  ids.forEach((id)=>{
+  normalizedIds.forEach((id)=>{
     if(id===4||id===7) return; // construction-item benefits are conditional on build completion
     const m=IMODS[id];
     const supplyScale=(transportAtRisk && (id===19||id===20))?0.5:1;
@@ -1473,7 +1476,7 @@ function simulate(ids,habitation,budget){
   if(!has(9)) studentWarnings.push('Oxygen supply is limited. Crew runs out around Sol 45.');
   if(!has(8)&&has(19)) studentWarnings.push(`Water supply runs out around ${waterDurationText.replace('until ','')} unless you recycle it.`);
   if(has(9)&&!has(15)) studentWarnings.push('Oxygen system becomes unstable late mission without spare seals/filters.');
-  const timelinePack=buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
+  const timelinePack=buildMissionTimelines(normalizedIds,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
   const keyEvents=[{sol:0,type:'launch',outcome:'success'},{sol:0,type:'landing',outcome:'success'},...timelinePack.keyEvents];
 
   return {
@@ -1530,6 +1533,11 @@ function runDeterministicFixtures(){
 
   const uiGate=getSubmissionGateState([1,4,8,9],'surface',10,0);
   assert('UI gate: overweight does not disable submit',uiGate.ready===true && uiGate.overHard===true,`ready=${uiGate.ready} overHard=${uiGate.overHard}`);
+  const uiGateStr=getSubmissionGateState(['1','8','9','13'],'surface',12,0);
+  assert('UI gate normalizes string item IDs for budget math',uiGateStr.used===12 && uiGateStr.ready===true,`used=${uiGateStr.used} ready=${uiGateStr.ready}`);
+
+  const tStr=simulate(['1','8','9','13'],'surface',12);
+  assert('Simulator normalizes string item IDs',!tStr.invalid && tStr.muTotal===12 && tStr.transportStatus==='OK',`invalid=${!!tStr.invalid} muTotal=${tStr.muTotal} status=${tStr.transportStatus}`);
 
   const t10=simulate([1,9,10,13],'surface',12);
   assert('Hard dependency fail stays INVALID',!!t10.invalid && /Hydroponics requires water recycler/i.test(t10.invalidReason||''),`invalid=${!!t10.invalid} reason=${t10.invalidReason||''}`);
@@ -1596,6 +1604,20 @@ function formatMu(n){
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
+function normalizeSelectedIds(selected){
+  const ids=[];
+  const seen=new Set();
+  (Array.isArray(selected)?selected:[]).forEach((raw)=>{
+    const id=Number(raw);
+    if(!Number.isInteger(id)) return;
+    if(!ITEMS.some((it)=>it.id===id)) return;
+    if(seen.has(id)) return;
+    seen.add(id);
+    ids.push(id);
+  });
+  return ids.slice(0,4);
+}
+
 function normalizeSessionId(v){
   const n=String(v||'').trim().toLowerCase().replace(/[^a-z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
   return n||'lesson7-live';
@@ -1632,7 +1654,17 @@ function initFirebase(){
 
 function canonicalSubmissions(arr){
   const byRound={};
-  (arr||[]).forEach((s)=>{if(s&&s.round>=1&&s.round<=3) byRound[s.round]=s;});
+  (arr||[]).forEach((s)=>{
+    if(!s||typeof s!=='object') return;
+    const round=Number(s.round);
+    if(!Number.isInteger(round)||round<1||round>3) return;
+    byRound[round]={
+      ...s,
+      round,
+      selected:normalizeSelectedIds(s.selected),
+      habitation:typeof s.habitation==='string'?s.habitation.toLowerCase():s.habitation,
+    };
+  });
   return [1,2,3].map((r)=>byRound[r]).filter(Boolean);
 }
 
@@ -2385,16 +2417,17 @@ function renderSlots(){
 }
 
 function getSubmissionGateState(selected,habitation,budget,reconfig){
-  const used=Math.round((selected.reduce((s,id)=>{const it=ITEMS.find(i=>i.id===id);return s+(it?it.mu:0);},0)+(reconfig||0))*100)/100;
+  const normalized=normalizeSelectedIds(selected);
+  const used=Math.round((normalized.reduce((s,id)=>{const it=ITEMS.find(i=>i.id===id);return s+(it?it.mu:0);},0)+(reconfig||0))*100)/100;
   const safeBudget=Math.max(0.01,parseMu(budget,12));
   const softLimit=Math.ceil(OVERWEIGHT_SOFT_MULTIPLIER*safeBudget);
   const overRatio=safeBudget>0?(used/safeBudget):99;
   const overSoft=used>safeBudget && used<=softLimit;
   const overHard=used>softLimit;
-  const has=(id)=>selected.includes(id);
+  const has=(id)=>normalized.includes(id);
   const depFail=has(10)&&!has(8);
   const habGateFail=(habitation==='partial' && !(has(4)||has(7))) || (habitation==='subsurface' && !(has(4)||has(5)));
-  const ready=selected.length===4 && Boolean(habitation) && !depFail && !habGateFail;
+  const ready=normalized.length===4 && Boolean(habitation) && !depFail && !habGateFail;
   return {used,overRatio,softLimit,overSoft,overHard,depFail,habGateFail,ready};
 }
 
@@ -2900,6 +2933,7 @@ function showSec(name){
   window.scrollTo(0,0);
 }
 function updateUI(){
+  S.selected=normalizeSelectedIds(S.selected);
   renderEquipment();
   renderSlots();
   renderBudget();
