@@ -133,7 +133,7 @@ Owning excavator/rover does not bypass this when Surface is selected.
 - Run automatically when URL contains `?sim-fixtures=1`.
 - Includes checks for:
   - no primary power fail day 10
-  - surface no-effective-shielding fail day 27
+  - surface no-effective-shielding fail day 30
   - printer deficit no-completion path
   - adequate printer completion path
   - budget 12: totals 12/14/15/16 map to OK/AT_RISK/AT_RISK/FAILED

@@ -1114,9 +1114,15 @@ function getCheckpointGeneration(ids,day){
   return Math.round((reactor+solar)*100)/100;
 }
 
-function getHabMultiplier(hab){
+function getHabMultiplier(hab,sol,ids){
+  const hasExcavator=Array.isArray(ids) && ids.includes(4);
+  const hasRover=Array.isArray(ids) && ids.includes(5);
+  if(hab==='subsurface'){
+    if(hasExcavator) return sol<60?0.65:0.35;
+    if(hasRover) return 0.65;
+    return 0.65;
+  }
   if(hab==='partial') return 0.65;
-  if(hab==='subsurface') return 0.35;
   return 1.0;
 }
 
@@ -1229,9 +1235,13 @@ function buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavato
     const draw=step.drawKW??step.pDraw??0;
     const net=step.netKW??step.net??Math.round((gen-draw)*100)/100;
     const deficit=Math.max(0,Math.round((draw-gen)*100)/100);
+    let deficitPenalty=0;
+    if(deficit>0 && deficit<=1) deficitPenalty=2*deficit;
+    else if(deficit>1 && deficit<=3) deficitPenalty=6*deficit;
+    else if(deficit>3) deficitPenalty=12*deficit;
 
-    ps = clamp(ps - (deficit*9) - ((has(2)&&!has(3)&&sol>=60)?4:0),0,100);
-    const habMult=getHabMultiplier(hab);
+    ps = clamp(ps - deficitPenalty - ((has(2)&&!has(3)&&sol>=60)?4:0),0,100);
+    const habMult=getHabMultiplier(hab,sol,ids);
     let shieldMult=1.0;
     if(printerCompletedAt!==null && sol>=printerCompletedAt) shieldMult*=0.65;
     if(excavatorReady && hab!=='surface' && sol>=60) shieldMult*=0.85;
@@ -1254,6 +1264,11 @@ function buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavato
     if(deficit>0) erLoss += deficit*1.5;
     if(has(2)&&!has(3)&&sol>=60) erLoss += 2;
     er = clamp(er-erLoss,0,100);
+
+    if(er<30 && block>0){
+      ls = clamp(ls-(5*(block/30)),0,100);
+      ps = clamp(ps-(3*(block/30)),0,100);
+    }
 
     cs = clamp((ls*0.45)+(ps*0.2)+(er*0.2)+(rs*0.15)+(has(16)?3:-2)+(has(17)?2:-2),0,100);
 
@@ -1472,7 +1487,7 @@ function simulate(ids,habitation,budget){
   }
 
   if(hab==='surface' && printerCompletedAt===null){
-    setFail(27,'RS','Surface radiation overload (no effective shielding)',true);
+    setFail(30,'RS','Surface radiation overload (no effective shielding)',false);
   }
   if(has(2)&&!has(3)) setFail(60,'ES','Solar output degrades without dust control',false);
   if(!has(9)) setFail(45,'CS','Oxygen supply is limited. Crew runs out around Sol 45.',false);
@@ -1519,13 +1534,13 @@ function runDeterministicFixtures(){
   assert('No power source -> fail day 10',t1.failDay===10 && /No primary power source/i.test(t1.failReason||''),`failDay=${t1.failDay} reason=${t1.failReason||''}`);
 
   const t2=simulate([1,8,9,13],'surface',12);
-  assert('Surface + no printer completion -> fail day 27',t2.failDay===27,`failDay=${t2.failDay}`);
+  assert('Surface + no printer completion -> fail day 30',t2.failDay===30,`failDay=${t2.failDay}`);
 
   const t3=simulate([2,7,8,10],'surface',12);
-  assert('Printer selected with deficits at 30/60 -> no completion and fail day 27',t3.printerCompletedAt===null && t3.failDay===27,`printerAt=${t3.printerCompletedAt} failDay=${t3.failDay}`);
+  assert('Printer selected with deficits at 30/60 -> no completion and fail day 30',t3.printerCompletedAt===null && t3.failDay===30,`printerAt=${t3.printerCompletedAt} failDay=${t3.failDay}`);
 
   const t4=simulate([1,2,7,8],'surface',13);
-  assert('Kilopower + solar + water + printer -> no early radiation fail',t4.printerCompletedAt===30 && t4.failDay!==27,`printerAt=${t4.printerCompletedAt} failDay=${t4.failDay}`);
+  assert('Kilopower + solar + water + printer -> no early radiation fail',t4.printerCompletedAt===30 && t4.failDay!==30,`printerAt=${t4.printerCompletedAt} failDay=${t4.failDay}`);
 
   const ow12_12=getTransportOutcome(12,12);
   assert('MU_budget=12, MU_total=12 -> OK',ow12_12.transportStatus==='OK' && ow12_12.softLimit===15,`status=${ow12_12.transportStatus} softLimit=${ow12_12.softLimit}`);
