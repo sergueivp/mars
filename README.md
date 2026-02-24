@@ -40,3 +40,14 @@ Open `index.html` in a browser.
 ## Security note
 
 - Current DB rules are open read/write. This is convenient for testing but not secure for production.
+
+## Combo tests (developer harness)
+
+- Run full combo matrix:
+  - `python3 tools/test_combos.py`
+- Run quick smoke check:
+  - `python3 tools/test_combos.py --smoke`
+- Run smoke unit test:
+  - `python3 tools/test_combos_smoke.py`
+
+Reports are saved to `reports/combo_test_report_<timestamp>.json`.
