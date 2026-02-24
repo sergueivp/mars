@@ -1074,43 +1074,324 @@ const IMODS={
   20:{RS:0,ES:0,EP:0,BC:0,CS:.5,pOut:0,pDraw:0},
 };
 
-function simulate(ids){
+const CHECKPOINTS=[0,30,60,90,120,150,180];
+const CONSTRUCTION_WINDOW_MAX=60;
+const MAX_OVERWEIGHT_RATIO=1.15;
+const WEAKNESS_LABELS={
+  RS:'Radiation protection',
+  ES:'Power stability',
+  EP:'Water/oxygen systems',
+  BC:'Repairs and breakdown risk',
+  CS:'Crew wellbeing',
+};
+
+function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
+
+function getSolarFactor(day,hasDustControl){
+  if(hasDustControl) return day<=60?1:0.9;
+  const step=Math.floor(day/30);
+  return clamp(1-step*0.15,0.35,1);
+}
+
+function getCheckpointGeneration(ids,day){
   const has=id=>ids.includes(id);
-  let pOut=0,pDraw=0;
-  ids.forEach(id=>{pOut+=IMODS[id].pOut;pDraw+=IMODS[id].pDraw;});
-  const deficit=Math.max(0,pDraw-pOut);
+  const reactor=has(1)?IMODS[1].pOut:0;
+  const solar=has(2)?Math.round((IMODS[2].pOut*getSolarFactor(day,has(3)))*100)/100:0;
+  return Math.round((reactor+solar)*100)/100;
+}
+
+function getCheckpointDraw(ids,day){
+  let draw=0;
+  ids.forEach((id)=>{
+    if((id===4||id===7) && day>CONSTRUCTION_WINDOW_MAX) return;
+    draw+=IMODS[id].pDraw;
+  });
+  return Math.round(draw*100)/100;
+}
+
+function classifyViability(viability100,failDay){
+  if(failDay!==null) return 'NON-VIABLE';
+  if(viability100>=70) return 'VIABLE';
+  if(viability100>=50) return 'MARGINAL';
+  return 'NON-VIABLE';
+}
+
+function buildDiagnostics(weaknesses){
+  const map={
+    'Radiation protection':'Improve shielding or move more of the habitat underground.',
+    'Power stability':'Increase power supply or reduce power use to protect life support.',
+    'Water/oxygen systems':'Strengthen water and oxygen support for long-term survival.',
+    'Repairs and breakdown risk':'Add maintenance capacity to reduce breakdown risk over time.',
+    'Crew wellbeing':'Support crew routines and comfort to keep long missions stable.',
+  };
+  const lines=weaknesses.map((w)=>map[w]).filter(Boolean);
+  while(lines.length<2) lines.push('Rebalance your system so weak areas are better protected.');
+  return lines.slice(0,2);
+}
+
+function getSelectedMu(ids){
+  return Math.round(ids.reduce((sum,id)=>{
+    const it=ITEMS.find((x)=>x.id===id);
+    return sum+(it?it.mu:0);
+  },0)*100)/100;
+}
+
+function getTransportStatus(tf){
+  if(tf<40) return 'FAILED';
+  if(tf<70) return 'AT RISK';
+  return 'OK';
+}
+
+function simulate(ids,habitation,budget,opts){
+  const has=id=>ids.includes(id);
+  const hab=(habitation||'surface').toLowerCase();
+  const forcedTf=(opts && Number.isFinite(opts.forceTf))?clamp(opts.forceTf,0,100):null;
+  const muBudget=Math.max(0.01,parseMu(budget,12));
+  const muTotal=getSelectedMu(ids);
+  const muOver=muTotal/muBudget;
+  if(muOver>MAX_OVERWEIGHT_RATIO && forcedTf===null){
+    return {
+      invalid:true,invalidReason:'Overweight exceeds 15% limit',
+      sc:{RS:0.8,ES:0.8,EP:0.8,BC:0.8,CS:0.8},
+      mv:0.8,viability100:16,resultLabel:'NON-VIABLE',
+      failDay:0,failIdx:'ES',failReason:'Overweight exceeds 15% limit',
+      pOut:0,pDraw:0,deficit:0,powerAt180:{day:180,pOut:0,pDraw:0,deficit:0,net:0},powerTimeline:[],
+      printerCompletedAt:null,excavatorReady:false,habitation:hab,
+      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+      weakestAreas:['Power stability','Water/oxygen systems'],
+      diagnostics:['Reduce cargo mass to stay within launch limits.','Keep mission mass closer to budget before resubmission.'],
+      tf:0,transportStatus:'FAILED',muTotal,muBudget,muOver,
+      oxygenDurationText:'unknown',waterDurationText:'unknown',
+      studentWarnings:['Submission invalid: overweight exceeds the allowed 15% band.'],
+    };
+  }
+
+  const overweightPct=Math.max(0,(muOver-1)*100);
+  const tfPenalty=muOver>1?4*overweightPct:0;
+  const tf=Math.round(forcedTf===null?clamp(100-tfPenalty,0,100):forcedTf);
+  const transportStatus=getTransportStatus(tf);
+
+  if(transportStatus==='FAILED'){
+    return {
+      sc:{RS:1.0,ES:0.8,EP:1.0,BC:1.0,CS:0.9},
+      mv:1.0,viability100:20,resultLabel:'NON-VIABLE',
+      failDay:0,failIdx:'ES',failReason:'Transport failure: spacecraft too heavy to reach Mars / land safely',
+      pOut:0,pDraw:0,deficit:0,powerAt180:{day:180,pOut:0,pDraw:0,deficit:0,net:0},powerTimeline:[],
+      printerCompletedAt:null,excavatorReady:false,habitation:hab,
+      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+      weakestAreas:['Power stability','Water/oxygen systems'],
+      diagnostics:['Reduce cargo mass before launch.','Balance mass and critical systems for safe transfer and landing.'],
+      tf,transportStatus,muTotal,muBudget,muOver,
+      oxygenDurationText:has(9)?'continuous':'until Sol 45',
+      waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
+      studentWarnings:['Transport check failed before mission start.'],
+    };
+  }
+
+  const hasPrimaryPower=has(1)||has(2);
+  const transportAtRisk=transportStatus==='AT RISK';
+
+  let printerCompletedAt=null;
+  let excavatorReady=false;
+  const powerTimeline=[];
+
+  CHECKPOINTS.forEach((day)=>{
+    const pOut=getCheckpointGeneration(ids,day);
+    const pDraw=getCheckpointDraw(ids,day);
+    const deficit=Math.max(0,Math.round((pDraw-pOut)*100)/100);
+    powerTimeline.push({day,pOut,pDraw,deficit,net:Math.round((pOut-pDraw)*100)/100});
+    if(has(7)&&printerCompletedAt===null){
+      if(day===30 && deficit<=1.0) printerCompletedAt=30;
+      if(day===60 && deficit<=1.0) printerCompletedAt=60;
+    }
+    if(day===60 && has(4)) excavatorReady=deficit<=2.0;
+  });
+
+  if(!hasPrimaryPower){
+    const sol180=powerTimeline.find((x)=>x.day===180) || {pOut:0,pDraw:0,deficit:0,net:0};
+    const sc={RS:1.0,ES:0.5,EP:1.0,BC:1.0,CS:0.8};
+    const weakest=['Power stability','Water/oxygen systems'];
+    const diagnostics=buildDiagnostics(weakest);
+    return {
+      sc,mv:1.0,viability100:20,resultLabel:'NON-VIABLE',
+      failDay:10,failIdx:'ES',failReason:'No primary power source (cannot run life support)',
+      pOut:sol180.pOut,pDraw:sol180.pDraw,deficit:sol180.deficit,
+      powerAt180:sol180,powerTimeline,
+      printerCompletedAt:null,excavatorReady:false,habitation:hab,
+      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+      weakestAreas:weakest,diagnostics,
+      tf,transportStatus,muTotal,muBudget,muOver,
+      oxygenDurationText:has(9)?'continuous':'until Sol 45',
+      waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
+      studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
+    };
+  }
+
+  if(hab==='partial' && !(has(4)||has(7))){
+    const sol180=powerTimeline.find((x)=>x.day===180) || {pOut:0,pDraw:0,deficit:0,net:0};
+    const sc={RS:1.2,ES:1.8,EP:1.2,BC:1.5,CS:1.2};
+    const weakest=['Radiation protection','Water/oxygen systems'];
+    const diagnostics=buildDiagnostics(weakest);
+    return {
+      sc,mv:1.5,viability100:30,resultLabel:'NON-VIABLE',
+      failDay:0,failIdx:'RS',failReason:'Partial subsurface requires excavator or shielding printer',
+      pOut:sol180.pOut,pDraw:sol180.pDraw,deficit:sol180.deficit,
+      powerAt180:sol180,powerTimeline,
+      printerCompletedAt,excavatorReady,habitation:hab,
+      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+      weakestAreas:weakest,diagnostics,
+      tf,transportStatus,muTotal,muBudget,muOver,
+      oxygenDurationText:has(9)?'continuous':'until Sol 45',
+      waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
+      studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
+    };
+  }
+  if(hab==='subsurface' && !(has(4)||has(5))){
+    const sol180=powerTimeline.find((x)=>x.day===180) || {pOut:0,pDraw:0,deficit:0,net:0};
+    const sc={RS:1.2,ES:1.8,EP:1.2,BC:1.5,CS:1.2};
+    const weakest=['Radiation protection','Water/oxygen systems'];
+    const diagnostics=buildDiagnostics(weakest);
+    return {
+      sc,mv:1.5,viability100:30,resultLabel:'NON-VIABLE',
+      failDay:0,failIdx:'RS',failReason:'Fully subsurface requires excavator or reconnaissance rover',
+      pOut:sol180.pOut,pDraw:sol180.pDraw,deficit:sol180.deficit,
+      powerAt180:sol180,powerTimeline,
+      printerCompletedAt,excavatorReady,habitation:hab,
+      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+      weakestAreas:weakest,diagnostics,
+      tf,transportStatus,muTotal,muBudget,muOver,
+      oxygenDurationText:has(9)?'continuous':'until Sol 45',
+      waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
+      studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
+    };
+  }
+
   let sc={...BASE};
-  ids.forEach(id=>{const m=IMODS[id];sc.RS+=m.RS;sc.ES+=m.ES;sc.EP+=m.EP;sc.BC+=m.BC;sc.CS+=m.CS;});
-  if(deficit>0) sc.ES-=deficit*.5;
+  ids.forEach((id)=>{
+    if(id===4||id===7) return; // construction-item benefits are conditional on build completion
+    const m=IMODS[id];
+    const supplyScale=(transportAtRisk && (id===19||id===20))?0.5:1;
+    sc.RS+=m.RS;
+    sc.ES+=m.ES;
+    sc.EP+=m.EP;
+    sc.BC+=m.BC;
+    sc.CS+=m.CS*supplyScale;
+  });
+
+  if(transportAtRisk) sc.ES -= 0.4; // PS_0 = 92 equivalent
+
   if(has(1)&&!has(11)) sc.EP-=.3;
-  if(has(4)&&has(5)){sc.RS+=sc.ES>=2.5?2.0:.5;sc.EP+=sc.ES>=2.5?1.5:.3;}
-  if(has(6)) sc.RS-=.3;
   if(has(10)&&!has(8)) sc.CS-=.7;
   if(has(1)&&has(13)) sc.BC+=.5;
   if(has(14)&&!has(13)) sc.BC-=.7;
-  Object.keys(sc).forEach(k=>sc[k]=Math.max(.5,Math.round(sc[k]*100)/100));
+
+  const habitationRS = hab==='surface' ? -0.4 : hab==='partial' ? 0.25 : 0.55;
+  sc.RS += habitationRS;
+
+  if(has(7)&&printerCompletedAt!==null){
+    sc.RS += IMODS[7].RS;
+    sc.EP += IMODS[7].EP;
+  }
+  if(has(4)&&excavatorReady){
+    sc.EP += IMODS[4].EP;
+    if(has(5)&&hab!=='surface'){
+      sc.RS += sc.ES>=2.5?2.0:.5;
+      sc.EP += sc.ES>=2.5?1.5:.3;
+    }
+  }
+
+  powerTimeline.forEach((step)=>{
+    if(step.deficit<=0) return;
+    sc.ES -= step.deficit*.25;
+    if(has(10)) sc.CS -= 0.12;
+    if(has(16)) sc.CS -= 0.06;
+    if(has(17)) sc.CS -= 0.04;
+    if(has(7)&&step.day<=60) sc.RS -= 0.05;
+    if(has(4)&&step.day<=60) sc.EP -= 0.05;
+  });
+
+  if(has(2)&&!has(3)) sc.ES -= 0.35;
+  if(!has(8)&&!has(19)) sc.CS -= 0.55;
+  else if(!has(8)&&has(19)) sc.CS -= 0.25;
+
+  Object.keys(sc).forEach((k)=>{sc[k]=Math.max(.5,Math.round(sc[k]*100)/100);});
   const mv=Math.round(Object.keys(WEIGHTS).reduce((s,k)=>s+sc[k]*WEIGHTS[k],0)*100)/100;
+  const viability100=Math.round(clamp(mv/5*100,0,100));
+
   let failDay=null,failIdx=null,failReason=null;
-  Object.keys(sc).forEach(k=>{
+  const setFail=(day,idx,reason)=>{
+    if(failDay===null || day<failDay){
+      failDay=day;failIdx=idx;failReason=reason;
+    }
+  };
+
+  Object.keys(sc).forEach((k)=>{
     if(sc[k]<THRESH[k]){
       const d=Math.max(0,Math.round(((sc[k]-FLOORS[k])/.2)*15));
-      if(failDay===null||d<failDay){failDay=d;failIdx=k;}
+      setFail(d,k,`${IDX_NAMES[k]} is projected to fall below safe level`);
     }
   });
-  if(has(2)&&!has(3)){
-    const sd=60;
-    if(failDay===null||sd<failDay){failDay=sd;failIdx='ES';failReason='Solar output degrading — atmospheric dust accumulation without cleaning provision';}
+
+  if(hab==='surface' && printerCompletedAt===null){
+    setFail(27,'RS','Surface radiation overload (no effective shielding)');
   }
-  if(has(6)&&!has(4)&&!has(7)){
-    const rd=27;
-    if(failDay===null||rd<failDay){failDay=rd;failIdx='RS';failReason='Surface habitat without radiation shielding — cumulative exposure exceeds 50 mSv threshold';}
-  }
-  if(!has(8)){
-    const wd=90;
-    if(failDay===null||wd<failDay){failDay=wd;failIdx='CS';failReason='No water recycling — crew water supply non-renewable, Crew Sustainability in decline from Day 30';}
-  }
-  return {sc,mv,failDay,failIdx,failReason,pOut,pDraw,deficit,
-    hasSolar:has(2),hasDust:has(3),hasSub:has(4)&&has(5),hasHab:has(6),hasShield:has(7),hasWater:has(8),hasRepair:has(13),hasReactor:has(1)};
+  if(has(2)&&!has(3)) setFail(60,'ES','Solar output degrades without dust control');
+  if(!has(9)) setFail(45,'CS','Oxygen supply is limited. Crew runs out around Sol 45.');
+  if(!has(8)&&!has(19)) setFail(90,'CS','Water reserves decline without recycling support');
+
+  const sol180=powerTimeline.find((x)=>x.day===180) || {pOut:0,pDraw:0,deficit:0,net:0};
+  const weaknessRank=Object.entries(sc).sort((a,b)=>a[1]-b[1]).slice(0,2).map(([k])=>WEAKNESS_LABELS[k]);
+  const diagnostics=buildDiagnostics(weaknessRank);
+  const oxygenDurationText=has(9)?'continuous':'until Sol 45';
+  const waterDurationText=has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90');
+  const studentWarnings=[];
+  if(transportAtRisk) studentWarnings.push('Overweight cargo reduced fuel/supplies; you start with fewer reserves.');
+  if(!has(9)) studentWarnings.push('Oxygen supply is limited. Crew runs out around Sol 45.');
+  if(!has(8)&&has(19)) studentWarnings.push(`Water supply runs out around ${waterDurationText.replace('until ','')} unless you recycle it.`);
+  if(has(9)&&!has(15)) studentWarnings.push('Oxygen system becomes unstable late mission without spare seals/filters.');
+
+  return {
+    sc,mv,viability100,resultLabel:classifyViability(viability100,failDay),
+    failDay,failIdx,failReason,
+    pOut:sol180.pOut,pDraw:sol180.pDraw,deficit:sol180.deficit,
+    powerAt180:sol180,powerTimeline,
+    printerCompletedAt,excavatorReady,habitation:hab,
+    hasSolar:has(2),hasDust:has(3),hasSub:excavatorReady&&hab!=='surface',hasHab:hab==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+    weakestAreas:weaknessRank,diagnostics,
+    tf,transportStatus,muTotal,muBudget,muOver,
+    oxygenDurationText,waterDurationText,studentWarnings,
+  };
+}
+
+function runDeterministicFixtures(){
+  const checks=[];
+  const assert=(name,pass,detail)=>checks.push({name,pass,detail});
+
+  const t1=simulate([8,9,11,13],'surface',12);
+  assert('No power source -> fail day 10',t1.failDay===10 && /No primary power source/i.test(t1.failReason||''),`failDay=${t1.failDay} reason=${t1.failReason||''}`);
+
+  const t2=simulate([1,8,9,13],'surface',12);
+  assert('Surface + no printer completion -> fail day 27',t2.failDay===27,`failDay=${t2.failDay}`);
+
+  const t3=simulate([2,7,8,10],'surface',12);
+  assert('Printer selected with deficits at 30/60 -> no completion and fail day 27',t3.printerCompletedAt===null && t3.failDay===27,`printerAt=${t3.printerCompletedAt} failDay=${t3.failDay}`);
+
+  const t4=simulate([1,7,8,9],'surface',12);
+  assert('Kilopower + water + CO2 + printer -> no early radiation fail',t4.printerCompletedAt===30 && t4.failDay!==27,`printerAt=${t4.printerCompletedAt} failDay=${t4.failDay}`);
+
+  const t5=simulate([1,8,9,15],'surface',10);
+  assert('MU_over 1.10 -> accepted with computed TF',!t5.invalid && t5.transportStatus==='AT RISK' && t5.tf===60,`invalid=${!!t5.invalid} status=${t5.transportStatus} tf=${t5.tf}`);
+
+  const t6=simulate([1,8,9,19],'surface',10);
+  assert('MU_over 1.20 -> invalid overweight >15%',!!t6.invalid && /Overweight exceeds 15%/i.test(t6.invalidReason||''),`invalid=${!!t6.invalid} reason=${t6.invalidReason||''}`);
+
+  const t7=simulate([1,8,9,15],'surface',10,{forceTf:35});
+  assert('TF < 40 -> immediate failure day 0 (transport failure)',t7.transportStatus==='FAILED' && t7.failDay===0 && /Transport failure/i.test(t7.failReason||''),`status=${t7.transportStatus} failDay=${t7.failDay} reason=${t7.failReason||''}`);
+
+  return {
+    ok:checks.every((c)=>c.pass),
+    checks,
+  };
 }
 
 const IDX_NAMES={RS:'Radiation Safety',ES:'Energy Stability',EP:'Environmental Protection',BC:'Backup & Repair',CS:'Crew Sustainability'};
@@ -1535,8 +1816,10 @@ function getIndexBand(score,key){
 }
 
 function buildFeedback(r,round,team,hab,reportId){
-  const stCls=r.failDay?'fail':r.mv>=3.0?'pass':'warn';
-  const stTxt=r.failDay?'NON-VIABLE':r.mv>=3.0?'CONDITIONALLY VIABLE':'BELOW THRESHOLD';
+  const stTxt=r.resultLabel||'NON-VIABLE';
+  const stCls=stTxt==='VIABLE'?'pass':stTxt==='MARGINAL'?'warn':'fail';
+  const transport=r.transportStatus||'OK';
+  const transportColor=transport==='OK'?'var(--green)':transport==='AT RISK'?'var(--orange)':'var(--red)';
   const idxRows=Object.keys(THRESH).map(k=>{
     const sc=r.sc[k],th=THRESH[k];
     const pct=Math.min((sc/5)*100,100);
@@ -1551,50 +1834,80 @@ function buildFeedback(r,round,team,hab,reportId){
       <div class="idx-lbl" style="color:${col}">${lbl}</div>
     </div>`;
   }).join('');
-  const lines=[];
-  if(r.deficit>0) lines.push({c:'crit',t:`Power demand exceeds generation by ${r.deficit} kW. Energy Stability penalty applied at Day 0. Systems requiring ≥${r.deficit} kW additional will operate below rated specification.`});
-  if(r.hasSub) lines.push({c:'',t:'Items 04 and 05 detected together. Subsurface mapping and excavation capacity confirmed. Underground transition window: estimated Day 40–45 depending on terrain findings.'});
-  if(r.hasSolar&&!r.hasDust) lines.push({c:'crit',t:'Solar Array selected without dust management provision. Optical depth τ data indicates dust accumulation at this site. Output projected −0.3 ES per 30 sols. Threshold breach: Day 60.'});
-  if(r.hasHab&&!r.hasShield&&!r.hasSub) lines.push({c:'crit',t:'Surface habitat without shielding detected. Radiation dose rate at this altitude: ~1.05 mSv/day baseline + SPE events. RS at 1.5 — below survival threshold at Day 0. Shielding or habitation change required before Day 27.'});
-  if(!r.hasWater) lines.push({c:'crit',t:'No water recycling system in configuration. Non-renewable reserve depletes. Crew Sustainability projected to decline at −0.5 per 30 days from Day 30. Critical threshold: Day 90.'});
-  if(r.hasReactor&&!r.hasRepair) lines.push({c:'',t:'Kilopower Reactor selected without maintenance provision. Reactor degradation cycle begins Day 90. BC at 0.5 — insufficient to prevent cascade effects on primary power generation.'});
-  if(r.hasSub&&r.sc.BC<2.0) lines.push({c:'',t:'Subsurface configuration produces strong RS and EP indices. Primary unresolved vulnerability: Backup & Repair Capacity remains below threshold. Single component failure risk remains elevated.'});
-  if(r.mv>=3.0&&!r.failDay) lines.push({c:'',t:`Mission Viability score ${r.mv} meets minimum threshold at Day 0. No immediate critical failure pathway identified. Monitor index trajectories across revision rounds.`});
-  const failBlock=r.failDay!==null?`<div class="fail-day"><div><div class="fail-day-lbl">PROJECTED CRITICAL EVENT — ${IDX_NAMES[r.failIdx]}</div><div style="font-family:var(--font-mono);font-size:9px;color:rgba(192,57,43,.6);margin-top:3px">${r.failReason||'Index below catastrophic floor'}</div></div><div class="fail-day-val">DAY ${r.failDay}</div></div>`:'' ;
+  const weakest=(r.weakestAreas&&r.weakestAreas.length)?r.weakestAreas:['Power stability','Crew wellbeing'];
+  const diagnostics=(r.diagnostics&&r.diagnostics.length)?r.diagnostics:buildDiagnostics(weakest);
+  const failText=r.failDay===null?'No failure before Sol 180':`Sol ${r.failDay}`;
+  const oxygenText=r.oxygenDurationText||'unknown';
+  const waterText=r.waterDurationText||'unknown';
+  const warningRows=(r.studentWarnings||[]).map((w)=>`<div class="fb-line">${w}</div>`).join('');
+  const failBlock=r.failDay!==null?`<div class="fail-day"><div><div class="fail-day-lbl">PROJECTED CRITICAL EVENT — ${IDX_NAMES[r.failIdx]||'SYSTEM RISK'}</div><div style="font-family:var(--font-mono);font-size:9px;color:rgba(192,57,43,.6);margin-top:3px">${r.failReason||'System failure risk detected'}</div></div><div class="fail-day-val">DAY ${r.failDay}</div></div>`:'' ;
   const failMarker = r.failDay!==null
-    ? `<div style="font-family:var(--font-mono);font-size:9px;color:var(--red);margin-top:6px">DAY ${r.failDay} — ${IDX_NAMES[r.failIdx]} CRITICAL</div>`
+    ? `<div style="font-family:var(--font-mono);font-size:9px;color:var(--red);margin-top:6px">DAY ${r.failDay} — ${(IDX_NAMES[r.failIdx]||'SYSTEM')} CRITICAL</div>`
     : '';
+  if(transport==='FAILED'){
+    return `<div class="fb-report" id="fb-report-${reportId}" data-team="${esc(team)}">
+      <div class="fb-hdr">
+        <div><div class="fb-title">ARES COMMAND — SIMULATION REPORT ${ROUND_LABELS[round-1]}</div>
+        <div class="fb-meta">TEAM: ${esc(team||'—')} | SUBMISSION: ${ROUND_LABELS[round-1]} | HABITATION: ${esc((hab||'—').toUpperCase())}</div></div>
+        <div class="fb-status fail">NON-VIABLE</div>
+      </div>
+      <div class="g3 gap12 mb12" style="grid-template-columns:repeat(3,1fr)">
+        <div class="pwr-box"><div class="pwr-lbl">TRANSPORT CHECK</div><div class="pwr-val" style="font-size:18px;color:${transportColor}">${transport}</div></div>
+        <div class="pwr-box"><div class="pwr-lbl">EST. OXYGEN DURATION</div><div class="pwr-val" style="font-size:16px">${oxygenText}</div></div>
+        <div class="pwr-box"><div class="pwr-lbl">EST. WATER DURATION</div><div class="pwr-val" style="font-size:16px">${waterText}</div></div>
+      </div>
+      ${warningRows?`<div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:6px">MISSION NOTES</div>${warningRows}`:''}
+      ${failBlock}
+    </div>`;
+  }
+  const trajectorySection=transport==='FAILED' ? '' : `<div class="trajectory-wrap">
+      <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px">PROJECTED INDEX TRAJECTORY (DAY 0 → 180)</div>
+      <div class="trajectory-canvas"><canvas id="traj-${reportId}"></canvas></div>
+      ${failMarker}
+    </div>`;
   return `<div class="fb-report" id="fb-report-${reportId}" data-team="${esc(team)}">
     <div class="fb-hdr">
       <div><div class="fb-title">ARES COMMAND — SIMULATION REPORT ${ROUND_LABELS[round-1]}</div>
-      <div class="fb-meta">TEAM: ${esc(team||'—')} | SUBMISSION: ${ROUND_LABELS[round-1]} | HABITATION: ${esc((hab||'—').toUpperCase())} | MV: ${r.mv.toFixed(2)}</div></div>
+      <div class="fb-meta">TEAM: ${esc(team||'—')} | SUBMISSION: ${ROUND_LABELS[round-1]} | HABITATION: ${esc((hab||'—').toUpperCase())} | SCORE: ${r.viability100}/100</div></div>
       <div class="fb-status ${stCls}">${stTxt}</div>
     </div>
-    <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px">POWER BALANCE</div>
     <div class="g3 gap12 mb12" style="grid-template-columns:repeat(3,1fr)">
-      <div class="pwr-box"><div class="pwr-lbl">GENERATION</div><div class="pwr-val" style="color:var(--green)">${r.pOut} kW</div></div>
-      <div class="pwr-box"><div class="pwr-lbl">DEMAND</div><div class="pwr-val" style="color:${r.pDraw<=r.pOut?'var(--orange)':'var(--red)'}">${r.pDraw} kW</div></div>
-      <div class="pwr-box"><div class="pwr-lbl">MARGIN</div><div class="pwr-val" style="color:${r.deficit===0?'var(--green)':'var(--red)'}">${r.deficit===0?'+'+(r.pOut-r.pDraw):'-'+r.deficit} kW</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">TRANSPORT CHECK</div><div class="pwr-val" style="font-size:18px;color:${transportColor}">${transport}</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">EST. OXYGEN DURATION</div><div class="pwr-val" style="font-size:16px">${oxygenText}</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">EST. WATER DURATION</div><div class="pwr-val" style="font-size:16px">${waterText}</div></div>
+    </div>
+    ${warningRows?`<div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:6px">MISSION NOTES</div>${warningRows}`:''}
+    <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px">POWER SUMMARY (SOL 180)</div>
+    <div class="g3 gap12 mb12" style="grid-template-columns:repeat(3,1fr)">
+      <div class="pwr-box"><div class="pwr-lbl">POWER PRODUCED</div><div class="pwr-val" style="color:var(--green)">${r.pOut} kW</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">POWER NEEDED</div><div class="pwr-val" style="color:${r.pDraw<=r.pOut?'var(--orange)':'var(--red)'}">${r.pDraw} kW</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">POWER MARGIN</div><div class="pwr-val" style="color:${r.deficit===0?'var(--green)':'var(--red)'}">${r.deficit===0?`+${Math.round((r.pOut-r.pDraw)*100)/100}`:`-${r.deficit}`} kW</div></div>
+    </div>
+    <div class="g3 gap12 mb12" style="grid-template-columns:repeat(3,1fr)">
+      <div class="pwr-box"><div class="pwr-lbl">RESULT</div><div class="pwr-val" style="font-size:18px;color:${stCls==='pass'?'var(--green)':stCls==='warn'?'var(--orange)':'var(--red)'}">${stTxt}</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">VIABILITY SCORE</div><div class="pwr-val" style="font-size:18px;color:${r.viability100>=70?'var(--green)':r.viability100>=50?'var(--orange)':'var(--red)'}">${r.viability100}/100</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">PROJECTED FAILURE DAY</div><div class="pwr-val" style="font-size:16px;color:${r.failDay===null?'var(--green)':'var(--red)'}">${failText}</div></div>
     </div>
     <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px">INDEX SCORES AT DAY 0</div>
     ${idxRows}
     <div class="divider"></div>
     <div style="display:grid;grid-template-columns:1fr 160px;gap:16px;align-items:center">
-      <div><div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:12px">DIAGNOSTIC OBSERVATIONS</div>
-      ${lines.map(l=>`<div class="fb-line ${l.c}">${l.t}</div>`).join('')}</div>
-      <div class="mv-box"><div class="mv-lbl">MISSION VIABILITY</div><div class="mv-val ${r.mv>=3.0?'text-green':'text-red'}">${r.mv.toFixed(2)}</div><div class="mv-thresh">THRESHOLD: 3.00</div></div>
+      <div>
+        <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:12px">TWO WEAKEST AREAS</div>
+        ${weakest.slice(0,2).map((w)=>`<div class="fb-line crit">${w}</div>`).join('')}
+        <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin:14px 0 10px">DIAGNOSTICS</div>
+        ${diagnostics.slice(0,2).map((d)=>`<div class="fb-line">${d}</div>`).join('')}
+      </div>
+      <div class="mv-box"><div class="mv-lbl">MISSION VIABILITY</div><div class="mv-val ${r.viability100>=70?'text-green':r.viability100>=50?'text-crimson':'text-red'}">${r.viability100}</div><div class="mv-thresh">OUT OF 100</div></div>
     </div>
-    <div class="trajectory-wrap">
-      <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px">PROJECTED INDEX TRAJECTORY (DAY 0 → 180)</div>
-      <div class="trajectory-canvas"><canvas id="traj-${reportId}"></canvas></div>
-      ${failMarker}
-    </div>
+    ${trajectorySection}
     ${failBlock}
   </div>`;
 }
 
 function computeTrajectorySeries(result){
   const series = {RS:[],ES:[],EP:[],BC:[],CS:[]};
+  const hab=(result.habitation||'surface').toLowerCase();
   TRAJ_DAYS.forEach((day)=>{
     let rs = result.sc.RS;
     let es = result.sc.ES;
@@ -1605,8 +1918,10 @@ function computeTrajectorySeries(result){
     if(result.hasSolar && !result.hasDust){
       es = Math.max(0, es - (day/30)*0.3);
     }
-    if(result.hasHab && !result.hasShield && !result.hasSub){
+    if(hab==='surface' && result.printerCompletedAt===null){
       rs = Math.max(0, rs - day*0.06);
+    }else if(hab==='surface' && result.printerCompletedAt!==null && day<result.printerCompletedAt){
+      rs = Math.max(0, rs - day*0.03);
     }
     if(!result.hasWater && day > 30){
       cs = Math.max(0, cs - ((day-30)/30)*0.5);
@@ -1722,24 +2037,33 @@ function renderSlots(){
 
 function renderBudget(){
   const used=Math.round((S.selected.reduce((s,id)=>{const it=ITEMS.find(i=>i.id===id);return s+(it?it.mu:0);},0)+S.reconfig)*100)/100;
-  const pct=S.budget>0?Math.min((used/S.budget)*100,100):100;
-  const over=used>S.budget;
+  const overRatio=S.budget>0?(used/S.budget):99;
+  const pct=S.budget>0?Math.min(overRatio*100,115):100;
+  const overSoft=overRatio>1 && overRatio<=1.15;
+  const overHard=overRatio>1.15;
   document.getElementById('mu-used').textContent=formatMu(used);
   document.getElementById('mu-total').textContent=formatMu(S.budget);
   document.getElementById('mu-used-eq').textContent=formatMu(used);
   const bar=document.getElementById('bud-bar');
   bar.style.width=pct+'%';
-  bar.className='bud-bar'+(over?' over':'');
+  bar.className='bud-bar'+((overSoft||overHard)?' over':'');
   const bw=document.getElementById('bud-warn');
-  if(over){bw.style.display='flex';document.getElementById('bud-warn-text').textContent=`Budget exceeded by ${formatMu(Math.round((used-S.budget)*100)/100)} MU.`;}
+  if(overHard){
+    bw.style.display='flex';
+    document.getElementById('bud-warn-text').textContent='Overweight exceeds 15% limit. Submission invalid.';
+  }else if(overSoft){
+    bw.style.display='flex';
+    document.getElementById('bud-warn-text').textContent='Overweight accepted (risk). Launch/transfer may fail.';
+  }
   else bw.style.display='none';
   const btn=document.getElementById('submit-btn');
   const note=document.getElementById('submit-note');
-  const ready=S.selected.length===4&&!over&&S.habitation;
+  const ready=S.selected.length===4&&!overHard&&S.habitation;
   btn.disabled=!ready;
   if(S.selected.length<4) note.textContent=`Select ${4-S.selected.length} more item(s)`;
   else if(!S.habitation) note.textContent='Select habitation strategy';
-  else if(over) note.textContent='Budget exceeded';
+  else if(overHard) note.textContent='Overweight exceeds 15%';
+  else if(overSoft) note.textContent='Overweight accepted (risk)';
   else note.textContent='Ready to submit';
 }
 
@@ -1936,7 +2260,11 @@ function onTeamIdChange(){
 }
 function submitProposal(){
   const team=getTeamIdInput();
-  const result=simulate(S.selected);
+  const result=simulate(S.selected,S.habitation,S.budget);
+  if(result.invalid){
+    showToast(result.invalidReason||'INVALID SUBMISSION','err');
+    return;
+  }
   const submission={
     id:`sub-${Date.now()}-${Math.floor(Math.random()*100000)}`,
     teamId:team,
@@ -2236,6 +2564,11 @@ function init(){
   setSolResetVisibility();
   // Charts on next tick to ensure canvas is visible
   setTimeout(initCharts,100);
+  if(window.location.search.includes('sim-fixtures=1')){
+    const fixtureReport=runDeterministicFixtures();
+    window.__simFixtureReport=fixtureReport;
+    if(!fixtureReport.ok) throw new Error('Deterministic fixture checks failed');
+  }
 }
 window.addEventListener('beforeunload',()=>{stopPresenceTracking();});
 init();
