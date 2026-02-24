@@ -1541,6 +1541,18 @@ function runDeterministicFixtures(){
   assert('Simulator normalizes string item IDs',!tStr.invalid && tStr.muTotal===12 && tStr.transportStatus==='OK',`invalid=${!!tStr.invalid} muTotal=${tStr.muTotal} status=${tStr.transportStatus}`);
   const tObj=simulate({0:'1',1:8,2:'9',3:13},'surface',12);
   assert('Simulator normalizes object-form item IDs from sync payloads',!tObj.invalid && tObj.muTotal===12 && tObj.transportStatus==='OK',`invalid=${!!tObj.invalid} muTotal=${tObj.muTotal} status=${tObj.transportStatus}`);
+  const prevSubs=allTeamSubmissions;
+  const prevSelected=[...S.selected];
+  const teamInput=document.getElementById('team-id');
+  const prevTeam=teamInput?teamInput.value:'';
+  allTeamSubmissions={TEAM1:[]};
+  S.selected=[1,8,9,13];
+  if(teamInput) teamInput.value='TEAM1';
+  onTeamIdChange();
+  assert('Realtime sync does not clear local selection for teams with no submissions',S.selected.length===4,`selected=${S.selected.join(',')}`);
+  allTeamSubmissions=prevSubs;
+  S.selected=prevSelected;
+  if(teamInput) teamInput.value=prevTeam;
 
   const t10=simulate([1,9,10,13],'surface',12);
   assert('Hard dependency fail stays INVALID',!!t10.invalid && /Hydroponics requires water recycler/i.test(t10.invalidReason||''),`invalid=${!!t10.invalid} reason=${t10.invalidReason||''}`);
@@ -1691,6 +1703,11 @@ function canonicalSubmissions(arr){
   return [1,2,3].map((r)=>byRound[r]).filter(Boolean);
 }
 
+function hasSubmissionHistory(teamId){
+  const subs=allTeamSubmissions[teamId];
+  return Array.isArray(subs) && subs.length>0;
+}
+
 function getFeedbackRenderKey(teamId,entries){
   const compact=(entries||[]).map((s)=>({
     id:s.id||'',
@@ -1817,10 +1834,12 @@ function applyRemoteState(data){
   onTeamIdChange();
 
   const activeTeam=getTeamIdInput();
-  if(activeTeam && allTeamSubmissions[activeTeam]){
+  if(activeTeam && hasSubmissionHistory(activeTeam)){
     applyLocalTeamFromSubmissions(activeTeam);
   }else if(accessState.role==='student' && accessState.teamId){
-    applyLocalTeamFromSubmissions(accessState.teamId);
+    if(hasSubmissionHistory(accessState.teamId)){
+      applyLocalTeamFromSubmissions(accessState.teamId);
+    }
   }
 }
 
@@ -2682,7 +2701,7 @@ function onTeamIdChange(){
     S.budget=parseMu(document.getElementById('budget-sel').value,S.budget);
     renderBudget();
   }
-  if(tidRaw && allTeamSubmissions[tidRaw]){
+  if(tidRaw && hasSubmissionHistory(tidRaw)){
     applyLocalTeamFromSubmissions(tidRaw);
   }
   renderComparisonPanel();
