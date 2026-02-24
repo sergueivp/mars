@@ -25,19 +25,20 @@
   - Hard failure at Sol 10
   - Reason: `No primary power source (cannot run life support)`
 
-## Overweight + Transport Layer
+## Transport Tolerance Adjustment – Integer Safe 20% Soft Band
 - MU budget is spacecraft cargo capacity proxy.
-- Overweight handling:
-  - `MU_total / MU_budget <= 1.00`: normal
-  - `1.00 < ratio <= 1.15`: accepted with transport risk
-  - `ratio > 1.15`: accepted, but deterministic transport failure at Sol 0
-- Transport Feasibility (`TF`) in `[0..100]`:
-  - Overweight penalty: `TF_penalty = 4 * overweight_pct`
-  - Status bands:
-    - `TF >= 70`: OK
-    - `40 <= TF < 70`: AT RISK
-    - `TF < 40`: FAILED
-- `AT RISK` applies deterministic startup penalties:
+- Compute soft tolerance limit with integer-safe rounding:
+  - `soft_limit = ceil(1.20 * MU_budget)`
+- Transport result:
+  - if `MU_total <= MU_budget`: `OK`
+  - if `MU_budget < MU_total <= soft_limit`: `AT_RISK`
+  - if `MU_total > soft_limit`: `FAILED` at Sol 0
+- Overweight is never an invalid submission by itself.
+- Invalid submission remains only for:
+  - not exactly 4 items
+  - habitation gating fail
+  - hard dependency fail
+- `AT_RISK` still applies deterministic startup penalties:
   - reduced reserve benefit for `item_19` and `item_20` (50%)
   - ES start stress equivalent to PS_0=92
 
@@ -120,6 +121,6 @@ Owning excavator/rover does not bypass this when Surface is selected.
   - surface no-effective-shielding fail day 27
   - printer deficit no-completion path
   - adequate printer completion path
-  - overweight acceptance in +15% band
-  - transport failure at Sol 0 above +15%
-  - TF status mapping for `< 40`.
+  - budget 12: totals 12/14/15/16 map to OK/AT_RISK/AT_RISK/FAILED
+  - budget 10: totals 11/12/13 map to AT_RISK/AT_RISK/FAILED
+  - overweight failure returns NON-VIABLE at Sol 0 (not INVALID).

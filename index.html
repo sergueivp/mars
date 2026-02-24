@@ -1088,7 +1088,7 @@ const IMODS={
 
 const CHECKPOINTS=[0,30,60,90,120,150,180];
 const CONSTRUCTION_WINDOW_MAX=60;
-const MAX_OVERWEIGHT_RATIO=1.15;
+const OVERWEIGHT_SOFT_MULTIPLIER=1.20;
 const WEAKNESS_LABELS={
   RS:'Radiation protection',
   ES:'Power stability',
@@ -1191,10 +1191,14 @@ function getSelectedMu(ids){
   },0)*100)/100;
 }
 
-function getTransportStatus(tf){
-  if(tf<40) return 'FAILED';
-  if(tf<70) return 'AT_RISK';
-  return 'OK';
+function getTransportOutcome(muTotal,muBudget){
+  const safeBudget=Math.max(0.01,parseMu(muBudget,12));
+  const softLimit=Math.ceil(OVERWEIGHT_SOFT_MULTIPLIER*safeBudget);
+  let transportStatus='OK';
+  if(muTotal>safeBudget && muTotal<=softLimit) transportStatus='AT_RISK';
+  else if(muTotal>softLimit) transportStatus='FAILED';
+  const tf=transportStatus==='OK'?100:transportStatus==='AT_RISK'?60:0;
+  return {transportStatus,softLimit,tf};
 }
 
 function buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk){
@@ -1274,6 +1278,7 @@ function buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavato
 }
 
 function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
+  const transportOutcome=getTransportOutcome(muTotal,muBudget);
   return {
     invalid:true,
     invalidReason:reason,
@@ -1285,7 +1290,7 @@ function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
     hasSolar:ids.includes(2),hasDust:ids.includes(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:ids.includes(8),hasRepair:ids.includes(13),hasReactor:ids.includes(1),
     weakestAreas:['Power stability','Water/oxygen systems'],
     diagnostics:['Fix submission requirements and try again.','Check dependencies and habitation requirements.'],
-    tf:100,transportStatus:'OK',muTotal,muBudget,muOver,
+    tf:transportOutcome.tf,transportStatus:transportOutcome.transportStatus,muTotal,muBudget,muSoftLimit:transportOutcome.softLimit,muOver,
     oxygenDurationText:ids.includes(9)?'continuous':'until Sol 45',
     waterDurationText:ids.includes(8)?'continuous':(ids.includes(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
     studentWarnings:[],
@@ -1293,10 +1298,9 @@ function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
   };
 }
 
-function simulate(ids,habitation,budget,opts){
+function simulate(ids,habitation,budget){
   const has=id=>ids.includes(id);
   const hab=(habitation||'surface').toLowerCase();
-  const forcedTf=(opts && Number.isFinite(opts.forceTf))?clamp(opts.forceTf,0,100):null;
   const muBudget=Math.max(0.01,parseMu(budget,12));
   const muTotal=getSelectedMu(ids);
   const muOver=muTotal/muBudget;
@@ -1311,11 +1315,10 @@ function simulate(ids,habitation,budget,opts){
     return buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,validationReasons.join(' | '));
   }
 
-  const overweightPct=Math.max(0,(muOver-1)*100);
-  const tfPenalty=muOver>1?4*overweightPct:0;
-  const baseTf=muOver>MAX_OVERWEIGHT_RATIO ? 0 : clamp(100-tfPenalty,0,100);
-  const tf=Math.round(forcedTf===null?baseTf:forcedTf);
-  const transportStatus=getTransportStatus(tf);
+  const transportOutcome=getTransportOutcome(muTotal,muBudget);
+  const transportStatus=transportOutcome.transportStatus;
+  const tf=transportOutcome.tf;
+  const muSoftLimit=transportOutcome.softLimit;
 
   if(transportStatus==='FAILED'){
     const keyEvents=[
@@ -1331,7 +1334,7 @@ function simulate(ids,habitation,budget,opts){
       hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
       weakestAreas:['Power stability','Water/oxygen systems'],
       diagnostics:['Reduce cargo mass before launch.','Balance mass and critical systems for safe transfer and landing.'],
-      tf,transportStatus,muTotal,muBudget,muOver,
+      tf,transportStatus,muTotal,muBudget,muSoftLimit,muOver,
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
       waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:['Your spacecraft lifted off, but used too much fuel. It could not enter Mars orbit safely.'],
@@ -1375,7 +1378,7 @@ function simulate(ids,habitation,budget,opts){
       printerCompletedAt:null,excavatorReady:false,habitation:hab,
       hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
       weakestAreas:weakest,diagnostics,
-      tf,transportStatus,muTotal,muBudget,muOver,
+      tf,transportStatus,muTotal,muBudget,muSoftLimit,muOver,
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
       waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
@@ -1481,7 +1484,7 @@ function simulate(ids,habitation,budget,opts){
     printerCompletedAt,excavatorReady,habitation:hab,
     hasSolar:has(2),hasDust:has(3),hasSub:excavatorReady&&hab!=='surface',hasHab:hab==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
     weakestAreas:weaknessRank,diagnostics,
-    tf,transportStatus,muTotal,muBudget,muOver,
+    tf,transportStatus,muTotal,muBudget,muSoftLimit,muOver,
     oxygenDurationText,waterDurationText,studentWarnings,
     radiationTimeline:timelinePack.radiationTimeline,
     lsTimeline:timelinePack.lsTimeline,
@@ -1507,16 +1510,25 @@ function runDeterministicFixtures(){
   const t4=simulate([1,7,8,9],'surface',12);
   assert('Kilopower + water + CO2 + printer -> no early radiation fail',t4.printerCompletedAt===30 && t4.failDay!==27,`printerAt=${t4.printerCompletedAt} failDay=${t4.failDay}`);
 
-  const t5=simulate([1,8,9,15],'surface',10);
-  assert('MU_over 1.10 -> accepted with computed TF',t5.transportStatus==='AT_RISK' && t5.tf===60,`status=${t5.transportStatus} tf=${t5.tf}`);
+  const ow12_12=getTransportOutcome(12,12);
+  assert('MU_budget=12, MU_total=12 -> OK',ow12_12.transportStatus==='OK' && ow12_12.softLimit===15,`status=${ow12_12.transportStatus} softLimit=${ow12_12.softLimit}`);
+  const ow12_14=getTransportOutcome(14,12);
+  assert('MU_budget=12, MU_total=14 -> AT_RISK',ow12_14.transportStatus==='AT_RISK',`status=${ow12_14.transportStatus}`);
+  const ow12_15=getTransportOutcome(15,12);
+  assert('MU_budget=12, MU_total=15 -> AT_RISK',ow12_15.transportStatus==='AT_RISK',`status=${ow12_15.transportStatus}`);
+  const ow12_16=getTransportOutcome(16,12);
+  assert('MU_budget=12, MU_total=16 -> FAILED',ow12_16.transportStatus==='FAILED',`status=${ow12_16.transportStatus}`);
+  const ow10_11=getTransportOutcome(11,10);
+  assert('MU_budget=10, MU_total=11 -> AT_RISK',ow10_11.transportStatus==='AT_RISK' && ow10_11.softLimit===12,`status=${ow10_11.transportStatus} softLimit=${ow10_11.softLimit}`);
+  const ow10_12=getTransportOutcome(12,10);
+  assert('MU_budget=10, MU_total=12 -> AT_RISK',ow10_12.transportStatus==='AT_RISK',`status=${ow10_12.transportStatus}`);
+  const ow10_13=getTransportOutcome(13,10);
+  assert('MU_budget=10, MU_total=13 -> FAILED',ow10_13.transportStatus==='FAILED',`status=${ow10_13.transportStatus}`);
 
-  const t6=simulate([1,8,9,19],'surface',10);
-  assert('MU_over 1.20 -> non-viable transport FAILED at Sol 0',t6.transportStatus==='FAILED' && t6.failDay===0 && /Transport failure/i.test(t6.failReason||''),`status=${t6.transportStatus} failDay=${t6.failDay} reason=${t6.failReason||''}`);
+  const t5=simulate([1,4,8,9],'surface',10);
+  assert('Overweight >20% -> NON-VIABLE transport FAILED at Sol 0',!t5.invalid && t5.transportStatus==='FAILED' && t5.failDay===0 && /Transport failure/i.test(t5.failReason||''),`invalid=${!!t5.invalid} status=${t5.transportStatus} failDay=${t5.failDay}`);
 
-  const t7=simulate([1,8,9,15],'surface',10,{forceTf:35});
-  assert('TF < 40 -> immediate failure day 0 (transport failure)',t7.transportStatus==='FAILED' && t7.failDay===0 && /Transport failure/i.test(t7.failReason||''),`status=${t7.transportStatus} failDay=${t7.failDay} reason=${t7.failReason||''}`);
-
-  const uiGate=getSubmissionGateState([1,8,9,19],'surface',10,0);
+  const uiGate=getSubmissionGateState([1,4,8,9],'surface',10,0);
   assert('UI gate: overweight does not disable submit',uiGate.ready===true && uiGate.overHard===true,`ready=${uiGate.ready} overHard=${uiGate.overHard}`);
 
   const t10=simulate([1,9,10,13],'surface',12);
@@ -1525,7 +1537,7 @@ function runDeterministicFixtures(){
   const t11=simulate([1,8,9],'surface',12);
   assert('Not exactly 4 items stays INVALID',!!t11.invalid && /exactly 4/i.test(t11.invalidReason||''),`invalid=${!!t11.invalid} reason=${t11.invalidReason||''}`);
 
-  const p1=buildPlaybackPlan(t7);
+  const p1=buildPlaybackPlan(t5);
   assert('Playback: transport failed stops after landing',p1.steps.length===2 && p1.steps[1].kind==='landing' && p1.completed===false,`steps=${p1.steps.map((s)=>s.kind).join(',')} completed=${p1.completed}`);
 
   const t8=simulate([1,7,9,13],'surface',12);
@@ -2366,14 +2378,16 @@ function renderSlots(){
 
 function getSubmissionGateState(selected,habitation,budget,reconfig){
   const used=Math.round((selected.reduce((s,id)=>{const it=ITEMS.find(i=>i.id===id);return s+(it?it.mu:0);},0)+(reconfig||0))*100)/100;
-  const overRatio=budget>0?(used/budget):99;
-  const overSoft=overRatio>1 && overRatio<=1.15;
-  const overHard=overRatio>1.15;
+  const safeBudget=Math.max(0.01,parseMu(budget,12));
+  const softLimit=Math.ceil(OVERWEIGHT_SOFT_MULTIPLIER*safeBudget);
+  const overRatio=safeBudget>0?(used/safeBudget):99;
+  const overSoft=used>safeBudget && used<=softLimit;
+  const overHard=used>softLimit;
   const has=(id)=>selected.includes(id);
   const depFail=has(10)&&!has(8);
   const habGateFail=(habitation==='partial' && !(has(4)||has(7))) || (habitation==='subsurface' && !(has(4)||has(5)));
   const ready=selected.length===4 && Boolean(habitation) && !depFail && !habGateFail;
-  return {used,overRatio,overSoft,overHard,depFail,habGateFail,ready};
+  return {used,overRatio,softLimit,overSoft,overHard,depFail,habGateFail,ready};
 }
 
 function renderBudget(){
@@ -2393,8 +2407,8 @@ function renderBudget(){
   bar.className='bud-bar'+((overSoft||overHard)?' over':'');
   const bw=document.getElementById('bud-warn');
   bw.style.display='flex';
-  if(overHard) document.getElementById('bud-warn-text').textContent='Overweight (>15%). Transport will fail 🚫';
-  else if(overSoft) document.getElementById('bud-warn-text').textContent='Overweight accepted (≤15%). Transport at risk ⚠️';
+  if(overHard) document.getElementById('bud-warn-text').textContent='Overweight (>20%). Transport will fail 🚫';
+  else if(overSoft) document.getElementById('bud-warn-text').textContent='Overweight accepted (≤20%). Transport at risk ⚠️';
   else document.getElementById('bud-warn-text').textContent='Cargo mass within limit ✅';
   const btn=document.getElementById('submit-btn');
   const note=document.getElementById('submit-note');
