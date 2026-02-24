@@ -224,9 +224,10 @@ function runReport(payload){
   const passRateByBudget={};
   budgets.forEach(function(b){
     const rows=out.filter(function(x){return Number(x.muBudget)===Number(b);});
-    passRateByBudget[String(b)]={viable:0,marginal:0,nonViable:0};
+    passRateByBudget[String(b)]={viable:0,marginal:0,nonViable:0,invalid:0};
     rows.forEach(function(r){
-      if(r.status==='VIABLE') passRateByBudget[String(b)].viable+=1;
+      if(r.status==='INVALID') passRateByBudget[String(b)].invalid+=1;
+      else if(r.status==='VIABLE') passRateByBudget[String(b)].viable+=1;
       else if(r.status==='MARGINAL') passRateByBudget[String(b)].marginal+=1;
       else passRateByBudget[String(b)].nonViable+=1;
     });
@@ -336,7 +337,7 @@ def _print_console_report(report: dict) -> None:
     for budget in report["budgets"]:
         s = report["passRateByBudget"][str(budget)]
         print(
-            f"MU {budget}: VIABLE={s['viable']}  MARGINAL={s['marginal']}  NON-VIABLE={s['nonViable']}"
+            f"MU {budget}: VIABLE={s['viable']}  MARGINAL={s['marginal']}  NON-VIABLE={s['nonViable']}  INVALID={s['invalid']}"
         )
 
 

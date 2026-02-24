@@ -232,6 +232,7 @@ body.app-locked .main{visibility:hidden}
 .fb-status.fail{color:var(--red);border-color:var(--red);background:var(--red-pale)}
 .fb-status.warn{color:var(--orange);border-color:var(--orange);background:rgba(192,112,0,.07)}
 .fb-status.pass{color:var(--green);border-color:var(--green);background:var(--green-pale)}
+.fb-status.invalid{color:var(--text-3);border-color:var(--border);background:#f1f2f5}
 .idx-row{display:grid;grid-template-columns:160px 60px 60px 1fr 110px;gap:10px;align-items:center;padding:7px 0;border-bottom:1px solid var(--border)}
 .idx-row:last-child{border-bottom:none}
 .idx-name{font-family:var(--font-body);font-size:13px;font-weight:600}
@@ -1098,6 +1099,8 @@ const WEAKNESS_LABELS={
   BC:'Repairs and breakdown risk',
   CS:'Crew wellbeing',
 };
+const FINAL_VIABLE_THRESH={RS:55,PS:45,LS:55,ER:35,CS:50};
+const FINAL_MARGINAL_THRESH={RS:45,PS:35,LS:45,ER:25,CS:40};
 
 function clamp(v,min,max){return Math.max(min,Math.min(max,v));}
 
@@ -1181,11 +1184,34 @@ function getCheckpointDraw(ids,day,hab){
   return Math.round(draw*100)/100;
 }
 
-function classifyViability(viability100,failDay){
-  if(failDay!==null) return 'NON-VIABLE';
-  if(viability100>=70) return 'VIABLE';
-  if(viability100>=50) return 'MARGINAL';
-  return 'NON-VIABLE';
+function getFinalMissionIndices(timelinePack){
+  const pick=(arr,key)=>{
+    if(!Array.isArray(arr)||arr.length===0) return 0;
+    const at180=arr.find((x)=>Number(x.sol)===180);
+    const row=at180||arr[arr.length-1];
+    return Number(row?.[key]||0);
+  };
+  return {
+    RS:pick(timelinePack?.radiationTimeline,'RS'),
+    PS:pick(timelinePack?.powerTimeline,'PS'),
+    LS:pick(timelinePack?.lsTimeline,'LS'),
+    ER:pick(timelinePack?.erTimeline,'ER'),
+    CS:pick(timelinePack?.csTimeline,'CS'),
+  };
+}
+
+function meetsFinalThresholds(finalIdx,thresholds){
+  return Object.keys(thresholds).every((k)=>Number(finalIdx?.[k]||0)>=Number(thresholds[k]));
+}
+
+function classifyMissionStatus({invalid,transportStatus,failDay,finalIndices}){
+  if(invalid) return {status:'INVALID',highRisk:false};
+  if(transportStatus==='FAILED') return {status:'NON-VIABLE',highRisk:false};
+  if(failDay!==null && Number(failDay)<180) return {status:'NON-VIABLE',highRisk:false};
+  const viable=meetsFinalThresholds(finalIndices,FINAL_VIABLE_THRESH);
+  if(viable) return {status:'VIABLE',highRisk:false};
+  const marginalFloor=meetsFinalThresholds(finalIndices,FINAL_MARGINAL_THRESH);
+  return {status:'MARGINAL',highRisk:!marginalFloor};
 }
 
 function buildDiagnostics(weaknesses){
@@ -1312,7 +1338,7 @@ function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
     invalid:true,
     invalidReason:reason,
     sc:{RS:1.0,ES:1.0,EP:1.0,BC:1.0,CS:1.0},
-    mv:1.0,viability100:0,resultLabel:'NON-VIABLE',status:'NON-VIABLE',
+    mv:1.0,viability100:0,resultLabel:'INVALID',status:'INVALID',
     failDay:null,failIdx:null,failReason:null,
     pOut:0,pDraw:0,deficit:0,powerAt180:{day:180,pOut:0,pDraw:0,deficit:0,net:0},powerTimeline:[],
     printerCompletedAt:null,excavatorReady:false,habitation:hab,
@@ -1320,6 +1346,7 @@ function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
     weakestAreas:['Power stability','Water/oxygen systems'],
     diagnostics:['Fix submission requirements and try again.','Check dependencies and habitation requirements.'],
     tf:transportOutcome.tf,transportStatus:transportOutcome.transportStatus,muTotal,muBudget,muSoftLimit:transportOutcome.softLimit,muOver,
+    highRisk:false,
     oxygenDurationText:normalized.includes(9)?'continuous':'until Sol 45',
     waterDurationText:normalized.includes(8)?'continuous':(normalized.includes(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
     studentWarnings:[],
@@ -1373,6 +1400,7 @@ function simulate(ids,habitation,budget){
       weakestAreas:['Power stability','Water/oxygen systems'],
       diagnostics:['Reduce cargo mass before launch.','Balance mass and critical systems for safe transfer and landing.'],
       tf,transportStatus,muTotal,muBudget,muSoftLimit,muOver,
+      highRisk:false,
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
       waterDurationText:has(8)?'continuous':(has(19)?(habitationUsed==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:['Your spacecraft lifted off, but used too much fuel. It could not enter Mars orbit safely.'],
@@ -1417,6 +1445,7 @@ function simulate(ids,habitation,budget){
       hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:habitationUsed==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
       weakestAreas:weakest,diagnostics,
       tf,transportStatus,muTotal,muBudget,muSoftLimit,muOver,
+      highRisk:false,
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
       waterDurationText:has(8)?'continuous':(has(19)?(habitationUsed==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
@@ -1537,6 +1566,8 @@ function simulate(ids,habitation,budget){
   if(failDay===0 && transportStatus!=='FAILED'){
     failDay=30;
   }
+  const finalIndices=getFinalMissionIndices(timelinePack);
+  const statusInfo=classifyMissionStatus({invalid:false,transportStatus,failDay,finalIndices});
 
   const weaknessRank=Object.entries(sc).sort((a,b)=>a[1]-b[1]).slice(0,2).map(([k])=>WEAKNESS_LABELS[k]);
   const diagnostics=buildDiagnostics(weaknessRank);
@@ -1548,9 +1579,10 @@ function simulate(ids,habitation,budget){
   if(!has(8)&&has(19)) studentWarnings.push(`Water supply runs out around ${waterDurationText.replace('until ','')} unless you recycle it.`);
   if(has(9)&&!has(15)) studentWarnings.push('Oxygen system becomes unstable late mission without spare seals/filters.');
   const keyEvents=[{sol:0,type:'launch',outcome:'success'},{sol:0,type:'landing',outcome:'success'},...timelinePack.keyEvents];
+  if(statusInfo.highRisk) studentWarnings.push('High risk: one or more core systems stay below marginal safety levels at Sol 180.');
 
   return {
-    sc,mv,viability100,resultLabel:classifyViability(viability100,failDay),status:classifyViability(viability100,failDay),
+    sc,mv,viability100,resultLabel:statusInfo.status,status:statusInfo.status,highRisk:statusInfo.highRisk,
     failDay,failIdx,failReason,
     pOut:sol180.genKW,pDraw:sol180.drawKW,deficit:sol180.deficit,
     powerAt180:sol180,powerTimeline:timelinePack.powerTimeline,
@@ -1575,10 +1607,10 @@ function runDeterministicFixtures(){
   assert('No power source -> fail day 10',t1.failDay===10 && /No primary power source/i.test(t1.failReason||''),`failDay=${t1.failDay} reason=${t1.failReason||''}`);
 
   const t2=simulate([1,8,9,13],'surface',12);
-  assert('Surface + no printer completion -> fail day 30',t2.failDay===30,`failDay=${t2.failDay}`);
+  assert('Surface + no printer completion -> fail day 27',t2.failDay===27,`failDay=${t2.failDay}`);
 
   const t3=simulate([2,7,8,10],'surface',12);
-  assert('Printer selected with deficits at 30/60 -> no completion and fail day 30',t3.printerCompletedAt===null && t3.failDay===30,`printerAt=${t3.printerCompletedAt} failDay=${t3.failDay}`);
+  assert('Printer selected with deficits at 30/60 -> no completion and fail day 27',t3.printerCompletedAt===null && t3.failDay===27,`printerAt=${t3.printerCompletedAt} failDay=${t3.failDay}`);
 
   const t4=simulate([1,2,7,8],'surface',13);
   assert('Kilopower + solar + water + printer -> no early radiation fail',t4.printerCompletedAt===30 && t4.failDay!==30,`printerAt=${t4.printerCompletedAt} failDay=${t4.failDay}`);
@@ -2229,7 +2261,8 @@ function getFailCategoryLabel(result){
 
 function buildFeedback(r,round,team,hab,reportId){
   const stTxt=r.resultLabel||'NON-VIABLE';
-  const stCls=stTxt==='VIABLE'?'pass':stTxt==='MARGINAL'?'warn':'fail';
+  const stCls=stTxt==='VIABLE'?'pass':stTxt==='MARGINAL'?'warn':stTxt==='INVALID'?'invalid':'fail';
+  const statusColor=stTxt==='VIABLE'?'var(--green)':stTxt==='MARGINAL'?'var(--orange)':stTxt==='INVALID'?'var(--text-3)':'var(--red)';
   const transport=r.transportStatus||'OK';
   const transportColor=transport==='OK'?'var(--green)':transport==='AT_RISK'?'var(--orange)':'var(--red)';
   const transportText=transport.replace('_',' ');
@@ -2259,6 +2292,7 @@ function buildFeedback(r,round,team,hab,reportId){
   const waterText=r.waterDurationText||'unknown';
   const habitatImpactText=getHabitationImpactText((r.habitation||hab||'surface').toLowerCase());
   const warningRows=(r.studentWarnings||[]).map((w)=>`<div class="fb-line">${w}</div>`).join('');
+  const highRiskLine=r.highRisk?`<div class="fb-line crit">HIGH RISK: Core systems remain below marginal thresholds at Sol 180.</div>`:'';
   const failBlock=r.failDay!==null?`<div class="fail-day"><div><div class="fail-day-lbl">PROJECTED CRITICAL EVENT — ${getFailCategoryLabel(r)}</div><div style="font-family:var(--font-mono);font-size:9px;color:rgba(192,57,43,.6);margin-top:3px">${r.failReason||'System failure risk detected'}</div></div><div class="fail-day-val">DAY ${r.failDay}</div></div>`:'' ;
   const failMarker = r.failDay!==null
     ? `<div style="font-family:var(--font-mono);font-size:9px;color:var(--red);margin-top:6px">DAY ${r.failDay} — ${(IDX_NAMES[r.failIdx]||'SYSTEM')} CRITICAL</div>`
@@ -2308,6 +2342,7 @@ function buildFeedback(r,round,team,hab,reportId){
       <div class="pwr-box"><div class="pwr-lbl">EST. WATER DURATION</div><div class="pwr-val" style="font-size:16px">${waterText}</div></div>
     </div>
     <div class="fb-line">${habitatImpactText}</div>
+    ${highRiskLine}
     ${warningRows?`<div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:6px">MISSION NOTES</div>${warningRows}`:''}
     ${playbackBlock}
     <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px">POWER SUMMARY (SOL 180)</div>
@@ -2317,8 +2352,8 @@ function buildFeedback(r,round,team,hab,reportId){
       <div class="pwr-box"><div class="pwr-lbl">POWER MARGIN</div><div class="pwr-val" style="color:${power180Deficit===0?'var(--green)':'var(--red)'}">${power180Deficit===0?`+${power180Net}`:`-${power180Deficit}`} kW</div></div>
     </div>
     <div class="g3 gap12 mb12" style="grid-template-columns:repeat(3,1fr)">
-      <div class="pwr-box"><div class="pwr-lbl">RESULT</div><div class="pwr-val" style="font-size:18px;color:${stCls==='pass'?'var(--green)':stCls==='warn'?'var(--orange)':'var(--red)'}">${stTxt}</div></div>
-      <div class="pwr-box"><div class="pwr-lbl">VIABILITY SCORE</div><div class="pwr-val" style="font-size:18px;color:${r.viability100>=70?'var(--green)':r.viability100>=50?'var(--orange)':'var(--red)'}">${r.viability100}/100</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">RESULT</div><div class="pwr-val" style="font-size:18px;color:${statusColor}">${stTxt}</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">VIABILITY SCORE</div><div class="pwr-val" style="font-size:18px;color:${statusColor}">${r.viability100}/100</div></div>
       <div class="pwr-box"><div class="pwr-lbl">PROJECTED FAILURE DAY</div><div class="pwr-val" style="font-size:16px;color:${r.failDay===null?'var(--green)':'var(--red)'}">${failText}</div></div>
     </div>
     <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px">INDEX SCORES AT DAY 0</div>
@@ -2331,7 +2366,7 @@ function buildFeedback(r,round,team,hab,reportId){
         <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin:14px 0 10px">DIAGNOSTICS</div>
         ${diagnostics.slice(0,2).map((d)=>`<div class="fb-line">${d}</div>`).join('')}
       </div>
-      <div class="mv-box"><div class="mv-lbl">MISSION VIABILITY</div><div class="mv-val ${r.viability100>=70?'text-green':r.viability100>=50?'text-crimson':'text-red'}">${r.viability100}</div><div class="mv-thresh">OUT OF 100</div></div>
+      <div class="mv-box"><div class="mv-lbl">MISSION VIABILITY</div><div class="mv-val ${stTxt==='VIABLE'?'text-green':stTxt==='MARGINAL'?'text-crimson':'text-red'}">${r.viability100}</div><div class="mv-thresh">OUT OF 100</div></div>
     </div>
     ${trajectorySection}
     ${failBlock}
