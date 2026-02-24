@@ -1538,6 +1538,8 @@ function runDeterministicFixtures(){
 
   const tStr=simulate(['1','8','9','13'],'surface',12);
   assert('Simulator normalizes string item IDs',!tStr.invalid && tStr.muTotal===12 && tStr.transportStatus==='OK',`invalid=${!!tStr.invalid} muTotal=${tStr.muTotal} status=${tStr.transportStatus}`);
+  const tObj=simulate({0:'1',1:8,2:'9',3:13},'surface',12);
+  assert('Simulator normalizes object-form item IDs from sync payloads',!tObj.invalid && tObj.muTotal===12 && tObj.transportStatus==='OK',`invalid=${!!tObj.invalid} muTotal=${tObj.muTotal} status=${tObj.transportStatus}`);
 
   const t10=simulate([1,9,10,13],'surface',12);
   assert('Hard dependency fail stays INVALID',!!t10.invalid && /Hydroponics requires water recycler/i.test(t10.invalidReason||''),`invalid=${!!t10.invalid} reason=${t10.invalidReason||''}`);
@@ -1605,9 +1607,18 @@ function formatMu(n){
 }
 
 function normalizeSelectedIds(selected){
+  const asList=(()=>{
+    if(Array.isArray(selected)) return selected;
+    if(selected && typeof selected==='object'){
+      return Object.keys(selected)
+        .sort((a,b)=>Number(a)-Number(b))
+        .map((k)=>selected[k]);
+    }
+    return [];
+  })();
   const ids=[];
   const seen=new Set();
-  (Array.isArray(selected)?selected:[]).forEach((raw)=>{
+  asList.forEach((raw)=>{
     const id=Number(raw);
     if(!Number.isInteger(id)) return;
     if(!ITEMS.some((it)=>it.id===id)) return;
