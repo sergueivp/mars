@@ -305,10 +305,19 @@ select.inp{cursor:pointer}
 .overview-table th{font-family:var(--font-mono);font-size:7px;color:var(--text-3);text-align:left;letter-spacing:.15em;text-transform:uppercase;padding:7px 8px;background:var(--bg-card);border-bottom:1px solid var(--border)}
 .overview-table td{font-family:var(--font-mono);font-size:10px;color:var(--text-2);padding:7px 8px;border-bottom:1px solid var(--border)}
 .overview-table tr:last-child td{border-bottom:none}
+.team-live{display:flex;align-items:center;gap:6px;margin-top:4px;flex-wrap:wrap}
+.live-chip{display:inline-block;padding:2px 6px;border:1px solid;border-radius:2px;font-size:8px;letter-spacing:.1em;text-transform:uppercase}
+.live-chip.proposal{color:var(--red);border-color:rgba(192,57,43,.45);background:var(--red-pale);animation:livepulse 1.8s ease-in-out infinite}
+.live-chip.active{color:var(--orange);border-color:rgba(192,112,0,.45);background:rgba(192,112,0,.08);animation:livepulse 2.1s ease-in-out infinite}
+.live-chip.online{color:var(--green);border-color:rgba(26,122,74,.35);background:var(--green-pale)}
+.live-chip.offline{color:var(--text-3);border-color:var(--border);background:#f3f4f7}
+.online-pill{display:inline-block;padding:2px 6px;border:1px solid var(--border);background:#f3f4f7;color:var(--text-2);font-size:8px;letter-spacing:.08em;text-transform:uppercase}
+@keyframes livepulse{0%,100%{opacity:.6}50%{opacity:1}}
 .ov-status{display:inline-block;padding:2px 6px;border:1px solid;font-size:8px;letter-spacing:.1em}
 .ov-status.viable{color:var(--green);border-color:rgba(26,122,74,.35);background:var(--green-pale)}
 .ov-status.critical{color:var(--orange);border-color:rgba(192,112,0,.35);background:rgba(192,112,0,.08)}
 .ov-status.nonviable{color:var(--red);border-color:rgba(192,57,43,.35);background:var(--red-pale)}
+.ov-status.waiting{color:var(--text-3);border-color:var(--border);background:#f3f4f7}
 .idx-cell.good{color:var(--green)}.idx-cell.warn{color:var(--orange)}.idx-cell.bad{color:var(--red)}
 .mv-cell.good{color:var(--green)}.mv-cell.bad{color:var(--red)}
 .btn-mini{background:transparent;border:1px solid var(--border);color:var(--text-2);font-family:var(--font-disp);font-size:8px;letter-spacing:.1em;padding:5px 8px;cursor:pointer;text-transform:uppercase}
@@ -428,7 +437,7 @@ select.inp{cursor:pointer}
             <table class="overview-table" id="overview-table">
               <thead>
                 <tr>
-                  <th>TEAM ID</th><th>ROUND</th><th>MV SCORE</th><th>RS</th><th>ES</th><th>EP</th><th>BC</th><th>CS</th><th>STATUS</th><th>FAIL DAY</th><th>ACTION</th>
+                  <th>TEAM ID / LIVE</th><th>ROUND</th><th>MV SCORE</th><th>RS</th><th>ES</th><th>EP</th><th>BC</th><th>CS</th><th>STATUS</th><th>FAIL DAY</th><th>ACTION</th>
                 </tr>
               </thead>
               <tbody id="overview-body"></tbody>
@@ -955,6 +964,7 @@ let teacherBudgets = {}; // team-id → budget
 let teacherSlots = 0;
 let teacherTokenMap = {}; // token -> {teamId,budget}
 let allTeamSubmissions = {};
+let liveTeamStatus = {};
 let solState = { current:1, timerId:null, max:180 };
 let trajectoryCharts = {};
 let feedbackSeq = 0;
@@ -964,6 +974,12 @@ let firebaseReady = false;
 let db = null;
 let currentSessionRef = null;
 let studentUnlockBusy = false;
+let presenceRef = null;
+let presenceHeartbeatId = null;
+let activeSection = 'site';
+const PRESENCE_STALE_MS = 45000;
+const PRESENCE_HEARTBEAT_MS = 15000;
+const clientId = `client-${Math.random().toString(36).slice(2,10)}-${Date.now().toString(36)}`;
 
 // ═══════════════════════════
 // CHARTS
@@ -1190,6 +1206,7 @@ function applyLocalTeamFromSubmissions(teamId){
 function applyRemoteState(data){
   const teams=data?.teams||{};
   const remoteSub=data?.submissions||{};
+  const rawPresence=data?.presence||{};
 
   teacherBudgets={};
   teacherTokenMap={};
@@ -1215,6 +1232,7 @@ function applyRemoteState(data){
     parsedSubs[String(teamId).toUpperCase()]=canonicalSubmissions(vals);
   });
   allTeamSubmissions=parsedSubs;
+  liveTeamStatus=getLiveTeamStatusMap(rawPresence);
   renderClassOverview();
 
   if(accessState.role==='student' && accessState.token && teacherTokenMap[accessState.token]){
@@ -1258,6 +1276,66 @@ function showAccessMessage(target,msg,isErr){
   if(!el) return;
   el.textContent=msg||'';
   el.style.color=isErr?'var(--red)':'var(--green)';
+}
+
+function getPresencePayload(){
+  return {
+    role:accessState.role||'guest',
+    teamId:(accessState.teamId||'').toUpperCase(),
+    section:activeSection,
+    lastSeen:Date.now(),
+  };
+}
+
+async function pushPresenceUpdate(){
+  if(!firebaseReady||!db||!presenceRef||!accessState.role) return;
+  try{
+    await presenceRef.update(getPresencePayload());
+  }catch(_err){}
+}
+
+function stopPresenceTracking(){
+  if(presenceHeartbeatId){
+    clearInterval(presenceHeartbeatId);
+    presenceHeartbeatId=null;
+  }
+  if(presenceRef){
+    presenceRef.remove().catch(()=>{});
+    presenceRef=null;
+  }
+}
+
+function startPresenceTracking(){
+  stopPresenceTracking();
+  if(!firebaseReady||!db||!accessState.role||!sessionId) return;
+  presenceRef=db.ref(`sessions/${sessionId}/presence/${clientId}`);
+  presenceRef.onDisconnect().remove();
+  presenceRef.set(getPresencePayload()).catch(()=>{});
+  presenceHeartbeatId=setInterval(()=>{pushPresenceUpdate();},PRESENCE_HEARTBEAT_MS);
+}
+
+function restartPresenceTracking(){
+  startPresenceTracking();
+}
+
+function getLiveTeamStatusMap(rawPresence){
+  const now=Date.now();
+  const map={};
+  Object.values(rawPresence||{}).forEach((entry)=>{
+    if(!entry||typeof entry!=='object') return;
+    const lastSeen=Number(entry.lastSeen)||0;
+    if(now-lastSeen>PRESENCE_STALE_MS) return;
+    const role=String(entry.role||'').toLowerCase();
+    if(role!=='student') return;
+    const teamId=String(entry.teamId||'').trim().toUpperCase();
+    if(!teamId) return;
+    const section=String(entry.section||'site').toLowerCase();
+    if(!map[teamId]) map[teamId]={online:0,proposal:0,active:0};
+    map[teamId].online += 1;
+    if(section==='proposal') map[teamId].proposal += 1;
+    if(['equipment','proposal','feedback','language','presentation'].includes(section)) map[teamId].active += 1;
+  });
+  return map;
 }
 
 function sleep(ms){
@@ -1311,6 +1389,7 @@ function enterApp(role){
   resetStudentBoot();
   document.getElementById('access-gate').style.display='none';
   setTeacherButtonVisibility(role==='teacher');
+  restartPresenceTracking();
 }
 
 function unlockTeacherAccess(){
@@ -1395,6 +1474,7 @@ function onSessionIdChange(){
   sessionId=normalizeSessionId(document.getElementById('session-id-input').value);
   document.getElementById('session-id-input').value=sessionId;
   if(firebaseReady) startSessionSync();
+  if(accessState.role) restartPresenceTracking();
 }
 
 function getTeamIdInput(){
@@ -1687,7 +1767,11 @@ function renderComparisonPanel(){
 }
 
 function renderClassOverview(){
-  const teams=Object.keys(allTeamSubmissions).sort();
+  const teams=[...new Set([
+    ...Object.keys(teacherBudgets||{}),
+    ...Object.keys(allTeamSubmissions||{}),
+    ...Object.keys(liveTeamStatus||{}),
+  ])].sort();
   const empty=document.getElementById('overview-empty');
   const wrap=document.getElementById('overview-wrap');
   const body=document.getElementById('overview-body');
@@ -1700,17 +1784,37 @@ function renderClassOverview(){
   empty.style.display='none';
   wrap.style.display='block';
   body.innerHTML=teams.map((teamId)=>{
-    const latest=allTeamSubmissions[teamId][allTeamSubmissions[teamId].length-1];
-    const r=latest.result;
-    const status=getOverviewStatus(r);
+    const list=allTeamSubmissions[teamId]||[];
+    const latest=list.length?list[list.length-1]:null;
+    const r=latest?.result||null;
+    const status=r?getOverviewStatus(r):{label:'WAITING',cls:'waiting'};
+    const live=liveTeamStatus[teamId]||{online:0,proposal:0,active:0};
+    let liveClass='offline';
+    let liveText='OFFLINE';
+    if(live.online>0 && live.proposal>0){
+      liveClass='proposal';
+      liveText='PROPOSAL LIVE';
+    }else if(live.online>0 && live.active>0){
+      liveClass='active';
+      liveText='MISSION ACTIVE';
+    }else if(live.online>0){
+      liveClass='online';
+      liveText='CONNECTED';
+    }
+    const safeTeam=teamId.replace(/[^A-Za-z0-9_-]/g,'-');
+    const hasSubmission=Boolean(r);
+    const roundLabel=latest ? (ROUND_LABELS[latest.round-1]||'—') : '—';
     return `<tr>
-      <td>${esc(teamId)}</td>
-      <td>${ROUND_LABELS[latest.round-1]||'—'}</td>
-      <td class="mv-cell ${r.mv>=3?'good':'bad'}">${r.mv.toFixed(2)}</td>
-      ${Object.keys(THRESH).map((k)=>`<td class="idx-cell ${getIndexBand(r.sc[k],k)}">${r.sc[k].toFixed(2)}</td>`).join('')}
+      <td><div>${esc(teamId)}</div><div class="team-live"><span class="live-chip ${liveClass}">${liveText}</span><span class="online-pill">${live.online} ONLINE</span></div></td>
+      <td>${roundLabel}</td>
+      <td class="${hasSubmission?`mv-cell ${r.mv>=3?'good':'bad'}`:''}">${hasSubmission?r.mv.toFixed(2):'—'}</td>
+      ${Object.keys(THRESH).map((k)=>{
+        if(!hasSubmission) return '<td>—</td>';
+        return `<td class="idx-cell ${getIndexBand(r.sc[k],k)}">${r.sc[k].toFixed(2)}</td>`;
+      }).join('')}
       <td><span class="ov-status ${status.cls}">${status.label}</span></td>
-      <td>${r.failDay===null?'—':'DAY '+r.failDay}</td>
-      <td><button class="btn-mini" id="clear-team-${teamId.replace(/[^A-Za-z0-9_-]/g,'-')}" data-team="${esc(teamId)}" onclick="clearTeamSubmissions(this.dataset.team)">CLEAR TEAM</button></td>
+      <td>${!hasSubmission||r.failDay===null?'—':'DAY '+r.failDay}</td>
+      <td>${hasSubmission?`<button class="btn-mini" id="clear-team-${safeTeam}" data-team="${esc(teamId)}" onclick="clearTeamSubmissions(this.dataset.team)">CLEAR TEAM</button>`:'—'}</td>
     </tr>`;
   }).join('');
 }
@@ -1771,6 +1875,10 @@ function onTeamIdChange(){
   const tidRaw=document.getElementById('team-id').value.trim().toUpperCase();
   const tid=tidRaw||'—';
   document.getElementById('team-display').textContent='TEAM: '+(tid||'—');
+  if(accessState.role==='student' && tidRaw){
+    accessState.teamId=tidRaw;
+    pushPresenceUpdate();
+  }
   if(tidRaw&&teacherBudgets[tidRaw]!==undefined){
     const b=teacherBudgets[tidRaw];
     document.getElementById('budget-sel').value=formatMu(b);
@@ -1855,6 +1963,7 @@ function clearAllClassroomData(){
   }
   Object.keys(trajectoryCharts).forEach((k)=>{trajectoryCharts[k].destroy();delete trajectoryCharts[k];});
   allTeamSubmissions={};
+  liveTeamStatus={};
   teacherBudgets={};
   teacherTokenMap={};
   teacherSlots=0;
@@ -1885,6 +1994,7 @@ function clearAllClassroomData(){
   renderRounds();
   renderComparisonPanel();
   resetSolCounter(true);
+  restartPresenceTracking();
   showToast('CLASSROOM DATA RESET');
 }
 
@@ -1986,7 +2096,7 @@ function broadcastBudgets(){
   document.getElementById('broadcast-info').textContent=`ACTIVE SESSION ${sessionId}: ${lines||'No teams configured'} — Students can enter with team PIN.`;
   const base='BUDGETS BROADCAST TO '+(Object.keys(teacherBudgets).length)+' TEAMS';
   showToast(base);
-  closeTeacher();
+  renderClassOverview();
 }
 // close on overlay click
 document.getElementById('teacher-modal').addEventListener('click',function(e){if(e.target===this) closeTeacher();});
@@ -2044,6 +2154,8 @@ function showSec(name){
   document.getElementById('sec-'+name).classList.add('active');
   const tabs=['site','equipment','proposal','feedback','language','presentation'];
   document.querySelectorAll('.nav-tab')[tabs.indexOf(name)]?.classList.add('active');
+  activeSection=name;
+  pushPresenceUpdate();
   window.scrollTo(0,0);
 }
 function updateUI(){
@@ -2084,6 +2196,7 @@ function init(){
   // Charts on next tick to ensure canvas is visible
   setTimeout(initCharts,100);
 }
+window.addEventListener('beforeunload',()=>{stopPresenceTracking();});
 init();
 </script>
 </body>
