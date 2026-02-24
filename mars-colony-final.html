@@ -981,6 +981,7 @@ let trajectoryCharts = {};
 let feedbackSeq = 0;
 let feedbackRenderState = { teamId:null, key:null };
 let accessState = { role:null, token:null, teamId:null };
+let teacherDraftDirty = false;
 let sessionId = 'lesson7-live';
 let firebaseReady = false;
 let db = null;
@@ -1547,6 +1548,17 @@ function runDeterministicFixtures(){
   const t11=simulate([1,8,9],'surface',12);
   assert('Not exactly 4 items stays INVALID',!!t11.invalid && /exactly 4/i.test(t11.invalidReason||''),`invalid=${!!t11.invalid} reason=${t11.invalidReason||''}`);
 
+  teacherUnlocked=true;
+  teacherSlots=4;
+  teacherDraftDirty=true;
+  window._tid_0='ALPHA';
+  window._tbud_0=12;
+  window._ttok_0='A1';
+  applyRemoteState({teams:{},submissions:{},presence:{}});
+  assert('Teacher draft is preserved during remote sync while dirty',window._tid_0==='ALPHA' && teacherSlots>=4,`tid0=${window._tid_0||''} teacherSlots=${teacherSlots}`);
+  teacherDraftDirty=false;
+  teacherUnlocked=false;
+
   const p1=buildPlaybackPlan(t5);
   assert('Playback: transport failed stops after landing',p1.steps.length===2 && p1.steps[1].kind==='landing' && p1.completed===false,`steps=${p1.steps.map((s)=>s.kind).join(',')} completed=${p1.completed}`);
 
@@ -1771,13 +1783,20 @@ function applyRemoteState(data){
   }));
   teamEntries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;if(e.token) teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
   if(accessState.role==='teacher'){
-    teacherSlots=Math.max(4,teamEntries.length);
-    for(let i=0;i<teamEntries.length;i++){
-      window['_tid_'+i]=teamEntries[i].teamId;
-      window['_tbud_'+i]=teamEntries[i].budget;
-      window['_ttok_'+i]=teamEntries[i].token;
+    // Preserve unsaved teacher slot edits from realtime sync overwrites.
+    const preserveDraft=teacherUnlocked && teacherDraftDirty;
+    if(!preserveDraft){
+      teacherSlots=Math.max(4,teamEntries.length);
+      Object.keys(window).forEach((k)=>{if(k.startsWith('_tid_')||k.startsWith('_tbud_')||k.startsWith('_ttok_')) delete window[k];});
+      for(let i=0;i<teamEntries.length;i++){
+        window['_tid_'+i]=teamEntries[i].teamId;
+        window['_tbud_'+i]=teamEntries[i].budget;
+        window['_ttok_'+i]=teamEntries[i].token;
+      }
+      renderTeamSlots();
+    }else{
+      teacherSlots=Math.max(teacherSlots,4);
     }
-    renderTeamSlots();
   }
 
   const parsedSubs={};
@@ -2748,6 +2767,7 @@ function clearAllClassroomData(){
   liveTeamStatus={};
   teacherBudgets={};
   teacherTokenMap={};
+  teacherDraftDirty=false;
   teacherSlots=0;
   feedbackSeq=0;
   feedbackRenderState={teamId:null,key:null};
@@ -2832,14 +2852,34 @@ function renderTeamSlots(){
     const current=parseMu(window['_tbud_'+i],12);
     const tok=(window['_ttok_'+i]||`TEAM-${i+1}`).toUpperCase();
     html+=`<div class="team-row">
-      <input class="inp" id="tid-${i}" type="text" placeholder="e.g. ALPHA-0${i+1}" value="${window['_tid_'+i]||''}">
-      <input class="inp" id="tbud-${i}" type="number" min="0" step="0.5" value="${formatMu(current)}">
-      <input class="inp" id="ttok-${i}" type="text" value="${esc(tok)}" placeholder="e.g. TEAM-ALPHA">
+      <input class="inp" id="tid-${i}" type="text" placeholder="e.g. ALPHA-0${i+1}" value="${window['_tid_'+i]||''}" oninput="onTeamSlotInput(${i},'team')">
+      <input class="inp" id="tbud-${i}" type="number" min="0" step="0.5" value="${formatMu(current)}" oninput="onTeamSlotInput(${i},'budget')">
+      <input class="inp" id="ttok-${i}" type="text" value="${esc(tok)}" placeholder="e.g. TEAM-ALPHA" oninput="onTeamSlotInput(${i},'token')">
     </div>`;
   }
   el.innerHTML=html;
 }
-function addTeamSlot(){teacherSlots++;renderTeamSlots();}
+function onTeamSlotInput(i,field){
+  if(field==='team'){
+    window['_tid_'+i]=(document.getElementById('tid-'+i)?.value||'').trim().toUpperCase();
+  }else if(field==='budget'){
+    const budget=parseMu(document.getElementById('tbud-'+i)?.value,12);
+    window['_tbud_'+i]=budget;
+  }else if(field==='token'){
+    const token=((document.getElementById('ttok-'+i)?.value||'').trim().toUpperCase()) || `TEAM-${i+1}`;
+    window['_ttok_'+i]=token;
+  }
+  teacherDraftDirty=true;
+}
+function addTeamSlot(){
+  teacherSlots++;
+  const idx=teacherSlots-1;
+  window['_tid_'+idx]=window['_tid_'+idx]||'';
+  window['_tbud_'+idx]=parseMu(window['_tbud_'+idx],12);
+  window['_ttok_'+idx]=(window['_ttok_'+idx]||`TEAM-${idx+1}`).toUpperCase();
+  teacherDraftDirty=true;
+  renderTeamSlots();
+}
 
 function collectTeamAllocations(){
   const entries=[];
@@ -2877,6 +2917,7 @@ function broadcastBudgets(){
   entries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
   publishTeacherConfig(entries);
   if(firebaseReady&&db) db.ref('activeSessionId').set(sessionId);
+  teacherDraftDirty=false;
   const lines=Object.entries(teacherBudgets).map(([k,v])=>`${k}: ${formatMu(v)} MU`).join(' · ');
   document.getElementById('broadcast-info').textContent=`ACTIVE SESSION ${sessionId}: ${lines||'No teams configured'} — Students can enter with team PIN.`;
   const base='BUDGETS BROADCAST TO '+(Object.keys(teacherBudgets).length)+' TEAMS';
