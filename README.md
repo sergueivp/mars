@@ -26,15 +26,15 @@ Open `index.html` in a browser.
 ## Access token workflow
 
 - Students cannot access the app until they pass the access gate.
-- Teacher enters as teacher with PIN, then configures `TEAM ID + MU + TOKEN`.
-- Teacher clicks `GENERATE PACKAGE` and shares the package string with students.
-- Student pastes package + team token in the gate.
-- Students using the same token are assigned the same team and MU setup.
+- Teacher enters as teacher with PIN, then configures `TEAM ID + MU + TEAM PIN`.
+- Teacher clicks `ACTIVATE BUDGETS` to publish the active classroom session.
+- Student enters only the short team PIN in the gate.
+- Students using the same PIN are assigned the same team and MU setup.
 
 ## Realtime sync (Firebase RTDB)
 
 - Session data syncs under `sessions/<session-id>`.
-- Teacher actions (`broadcast`, `generate package`, `clear team`, `clear all`) propagate to all connected instances.
+- Teacher actions (`broadcast`, `clear team`, `clear all`) propagate to all connected instances.
 - Team submissions sync live across devices.
 
 ## Security note

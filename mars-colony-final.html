@@ -355,17 +355,15 @@ select.inp{cursor:pointer}
   <div class="access-card">
     <div class="access-col">
       <div class="access-title">Student Access</div>
-      <div class="access-sub">Paste the classroom package shared by the teacher, then enter your team token. Students using the same token join the same team setup.</div>
-      <div class="inp-lbl">CLASSROOM PACKAGE</div>
-      <textarea class="inp justify-field access-area" id="student-package" placeholder="Paste package string from teacher"></textarea>
-      <div class="inp-lbl" style="margin-top:8px">TEAM TOKEN</div>
+      <div class="access-sub">Enter your short team PIN code. Students who use the same team PIN join the same team setup.</div>
+      <div class="inp-lbl" style="margin-top:8px">TEAM PIN</div>
       <input class="inp" id="student-token" type="text" placeholder="e.g. TEAM-ALPHA">
       <button class="btn" id="student-enter-btn" onclick="unlockStudentAccess()" style="margin-top:10px;font-size:10px;padding:10px 16px">ENTER CLASSROOM</button>
       <div class="access-msg" id="student-access-msg"></div>
     </div>
     <div class="access-col">
       <div class="access-title">Teacher Access</div>
-      <div class="access-sub">Enter teacher PIN to open the dashboard layer, manage team budgets/tokens, and generate a classroom package.</div>
+      <div class="access-sub">Enter teacher PIN to open the dashboard layer and manage team budgets and team PIN codes.</div>
       <div class="inp-lbl">TEACHER PIN</div>
       <input class="inp" id="teacher-gate-pin" type="password" placeholder="Enter teacher PIN">
       <button class="btn" id="teacher-enter-btn" onclick="unlockTeacherAccess()" style="margin-top:10px;font-size:10px;padding:10px 16px">ENTER AS TEACHER</button>
@@ -407,12 +405,6 @@ select.inp{cursor:pointer}
           <div class="modal-section-title">BROADCAST SETTINGS</div>
           <button class="btn" id="broadcast-btn" onclick="broadcastBudgets()" style="font-size:10px;padding:10px 20px">ACTIVATE BUDGETS →</button>
           <div class="broadcast-info" id="broadcast-info">No budgets activated yet. Enter team IDs, budgets, and tokens above, then click ACTIVATE.</div>
-        </div>
-        <div class="modal-section">
-          <div class="modal-section-title">STUDENT ACCESS PACKAGE</div>
-          <button class="btn" id="pkg-generate-btn" onclick="generateAccessPackage()" style="font-size:10px;padding:10px 20px">GENERATE PACKAGE →</button>
-          <textarea class="inp justify-field" id="pkg-output" readonly style="margin-top:10px;min-height:86px" placeholder="Package string will appear here"></textarea>
-          <div class="broadcast-info">Share this package with students, then give each team their token. Students with the same token enter the same team workspace.</div>
         </div>
         <div class="modal-section">
           <div class="modal-section-title">CLASS OVERVIEW — LIVE SUBMISSIONS</div>
@@ -1252,18 +1244,6 @@ function showAccessMessage(target,msg,isErr){
   el.style.color=isErr?'var(--red)':'var(--green)';
 }
 
-function encodePackage(obj){
-  return btoa(unescape(encodeURIComponent(JSON.stringify(obj))));
-}
-
-function decodePackage(str){
-  try{
-    return JSON.parse(decodeURIComponent(escape(atob(str))));
-  }catch(e){
-    return null;
-  }
-}
-
 function enterApp(role){
   accessState.role=role;
   document.getElementById('access-gate').style.display='none';
@@ -1287,30 +1267,37 @@ function unlockTeacherAccess(){
   openTeacher();
 }
 
-function unlockStudentAccess(){
-  const pkg=(document.getElementById('student-package').value||'').trim();
+async function unlockStudentAccess(){
   const token=(document.getElementById('student-token').value||'').trim().toUpperCase();
-  if(!pkg||!token){
-    showAccessMessage('student-access-msg','Package and token are required',true);
+  if(!token){
+    showAccessMessage('student-access-msg','Team PIN is required',true);
     return;
   }
-  const parsed=decodePackage(pkg);
-  if(!parsed||!Array.isArray(parsed.teams)){
-    showAccessMessage('student-access-msg','Invalid package format',true);
+  if(!firebaseReady||!db){
+    showAccessMessage('student-access-msg','Realtime sync unavailable',true);
     return;
   }
-  sessionId=normalizeSessionId(parsed.sessionId||parsed.session||sessionId);
+
+  const activeSnap=await db.ref('activeSessionId').once('value');
+  const active=normalizeSessionId(activeSnap.val()||sessionId);
+  if(!active){
+    showAccessMessage('student-access-msg','No active classroom session found',true);
+    return;
+  }
+
+  sessionId=active;
   document.getElementById('session-id-input').value=sessionId;
+  const sessionSnap=await db.ref(`sessions/${sessionId}`).once('value');
+  applyRemoteState(sessionSnap.val()||{});
   if(firebaseReady) startSessionSync();
-  const teamCfg=parsed.teams.find((t)=>String(t.token||'').toUpperCase()===token);
-  if(!teamCfg){
-    showAccessMessage('student-access-msg','Token not found in this package',true);
+
+  const cfg=teacherTokenMap[token];
+  if(!cfg){
+    showAccessMessage('student-access-msg','Invalid team PIN',true);
     return;
   }
-  const teamId=String(teamCfg.teamId||'').toUpperCase()||'—';
-  const teamBudget=parseMu(teamCfg.budget,12);
-  teacherBudgets[teamId]=teamBudget;
-  teacherTokenMap[token]={teamId,budget:teamBudget};
+  const teamId=cfg.teamId;
+  const teamBudget=parseMu(cfg.budget,12);
 
   accessState={role:'student',token,teamId};
   teacherUnlocked=false;
@@ -1805,7 +1792,6 @@ function clearAllClassroomData(){
   document.getElementById('budget-sel').value='12';
   document.getElementById('budget-sel').readOnly=false;
   document.getElementById('session-id-input').readOnly=false;
-  document.getElementById('pkg-output').value='';
   document.getElementById('session-id-input').value='lesson7-live';
   sessionId='lesson7-live';
   if(firebaseReady) startSessionSync();
@@ -1919,33 +1905,12 @@ function broadcastBudgets(){
   }
   entries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
   publishTeacherConfig(entries);
+  if(firebaseReady&&db) db.ref('activeSessionId').set(sessionId);
   const lines=Object.entries(teacherBudgets).map(([k,v])=>`${k}: ${formatMu(v)} MU`).join(' · ');
-  document.getElementById('broadcast-info').textContent=`ACTIVE: ${lines||'No teams configured'} — Students will be auto-assigned via access token package.`;
+  document.getElementById('broadcast-info').textContent=`ACTIVE SESSION ${sessionId}: ${lines||'No teams configured'} — Students can enter with team PIN.`;
   const base='BUDGETS BROADCAST TO '+(Object.keys(teacherBudgets).length)+' TEAMS';
   showToast(base);
   closeTeacher();
-}
-
-function generateAccessPackage(){
-  if(!teacherUnlocked) return;
-  const {entries,duplicateTokens}=collectTeamAllocations();
-  if(duplicateTokens.length){
-    showToast(`DUPLICATE TOKEN(S): ${duplicateTokens.join(', ')}`,'err');
-    return;
-  }
-  if(entries.length===0){
-    showToast('NO TEAM ALLOCATIONS TO PACKAGE','err');
-    return;
-  }
-  teacherBudgets={};
-  teacherTokenMap={};
-  entries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
-  publishTeacherConfig(entries);
-  const pkg=encodePackage({v:2,sessionId,issuedAt:new Date().toISOString(),teams:entries});
-  document.getElementById('pkg-output').value=pkg;
-  document.getElementById('student-package').value=pkg;
-  const base='ACCESS PACKAGE GENERATED';
-  showToast(base);
 }
 // close on overlay click
 document.getElementById('teacher-modal').addEventListener('click',function(e){if(e.target===this) closeTeacher();});
