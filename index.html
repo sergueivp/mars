@@ -979,6 +979,7 @@ let liveTeamStatus = {};
 let solState = { current:1, timerId:null, max:180 };
 let trajectoryCharts = {};
 let feedbackSeq = 0;
+let feedbackRenderState = { teamId:null, key:null };
 let accessState = { role:null, token:null, teamId:null };
 let sessionId = 'lesson7-live';
 let firebaseReady = false;
@@ -1621,19 +1622,43 @@ function canonicalSubmissions(arr){
   return [1,2,3].map((r)=>byRound[r]).filter(Boolean);
 }
 
+function getFeedbackRenderKey(teamId,entries){
+  const compact=(entries||[]).map((s)=>({
+    id:s.id||'',
+    round:s.round||0,
+    submittedAt:s.submittedAt||'',
+    selected:Array.isArray(s.selected)?s.selected.join(','):'',
+    habitation:s.habitation||'',
+    budget:parseMu(s.budget,0),
+    status:s.result?.status||s.result?.resultLabel||'',
+    failDay:s.result?.failDay??null,
+    tf:s.result?.tf??null,
+    transportStatus:s.result?.transportStatus||'',
+    mv:s.result?.mv??null,
+  }));
+  return `${teamId||'—'}::${JSON.stringify(compact)}`;
+}
+
 function renderFeedbackForTeam(teamId){
   const entries=canonicalSubmissions(allTeamSubmissions[teamId]||[]);
+  const renderKey=getFeedbackRenderKey(teamId,entries);
+  if(feedbackRenderState.teamId===teamId && feedbackRenderState.key===renderKey) return;
+  feedbackRenderState={teamId,key:renderKey};
   Object.keys(trajectoryCharts).forEach((k)=>{trajectoryCharts[k].destroy();delete trajectoryCharts[k];});
   const c=document.getElementById('fb-container');
   if(entries.length===0){
     c.innerHTML='';
     c.style.display='none';
     document.getElementById('fb-empty').style.display='block';
+    missionPlaybackResults={};
+    missionPlaybackControllers={};
     return;
   }
   document.getElementById('fb-empty').style.display='none';
   c.style.display='block';
   c.innerHTML='';
+  missionPlaybackResults={};
+  missionPlaybackControllers={};
   entries.slice().reverse().forEach((sub)=>{
     const reportId=++feedbackSeq;
     c.innerHTML += buildFeedback(sub.result,sub.round,sub.teamId||teamId,sub.habitation,reportId);
@@ -2628,6 +2653,9 @@ function clearTeamSubmissions(teamId){
     document.getElementById('fb-container').style.display='none';
     document.getElementById('fb-empty').style.display='block';
   }
+  feedbackRenderState={teamId:null,key:null};
+  missionPlaybackResults={};
+  missionPlaybackControllers={};
   renderClassOverview();
   showToast(`SUBMISSIONS CLEARED FOR ${teamId}`);
 }
@@ -2645,6 +2673,9 @@ function clearAllClassroomData(){
   teacherTokenMap={};
   teacherSlots=0;
   feedbackSeq=0;
+  feedbackRenderState={teamId:null,key:null};
+  missionPlaybackResults={};
+  missionPlaybackControllers={};
   Object.keys(window).forEach((k)=>{if(k.startsWith('_tid_')||k.startsWith('_tbud_')||k.startsWith('_ttok_')) delete window[k];});
   S=createInitialState();
   accessState={role:'teacher',token:null,teamId:null};
