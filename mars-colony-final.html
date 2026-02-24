@@ -7,6 +7,8 @@
 <title>ARES COMMAND — OPERATION: OLYMPUS FOOTHOLD</title>
 <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Nunito+Sans:wght@300;400;600;700;800&family=Montserrat:wght@400;600;700;800;900&display=swap" rel="stylesheet">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.0/chart.umd.min.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.12.5/firebase-database-compat.js"></script>
 <style>
 :root {
   --bg: #f0f0f0;
@@ -390,6 +392,11 @@ select.inp{cursor:pointer}
       <div id="teacher-content" style="display:none">
         <div class="modal-section">
           <div class="modal-section-title">TEAM BUDGET ALLOCATION</div>
+          <div class="team-row" style="grid-template-columns:1fr 160px 80px;margin-bottom:8px">
+            <div class="inp-lbl" style="margin-bottom:0;padding-top:10px">CLASS SESSION ID</div>
+            <input class="inp" id="session-id-input" type="text" value="lesson7-live" oninput="onSessionIdChange()">
+            <span id="session-sync-status" style="font-family:var(--font-mono);font-size:9px;color:var(--text-3);padding-top:10px">SYNC OFF</span>
+          </div>
           <div class="team-row" style="grid-template-columns:1fr 160px 80px;margin-bottom:10px">
             <div class="inp-lbl" style="margin-bottom:0;padding-top:10px">SPACECRAFT TOTAL CAPACITY (MU)</div>
             <input class="inp" id="cargo-cap-input" type="number" min="0" step="0.5" value="13" oninput="onCapacityChange()">
@@ -951,6 +958,10 @@ let solState = { current:1, timerId:null, max:180 };
 let trajectoryCharts = {};
 let feedbackSeq = 0;
 let accessState = { role:null, token:null, teamId:null };
+let sessionId = 'lesson7-live';
+let firebaseReady = false;
+let db = null;
+let currentSessionRef = null;
 
 // ═══════════════════════════
 // CHARTS
@@ -1090,6 +1101,159 @@ function formatMu(n){
   return Number.isInteger(n) ? String(n) : n.toFixed(1);
 }
 
+function normalizeSessionId(v){
+  const n=String(v||'').trim().toLowerCase().replace(/[^a-z0-9_-]/g,'-').replace(/-+/g,'-').replace(/^-|-$/g,'');
+  return n||'lesson7-live';
+}
+
+function setSyncStatus(text,isErr){
+  const el=document.getElementById('session-sync-status');
+  if(!el) return;
+  el.textContent=text;
+  el.style.color=isErr?'var(--red)':'var(--text-3)';
+}
+
+function initFirebase(){
+  try{
+    const cfg={
+      apiKey:'AIzaSyCWXSzEZUgKQHSeS24ox7i8PGWkqfEjVM4',
+      authDomain:'colony-d11f1.firebaseapp.com',
+      projectId:'colony-d11f1',
+      storageBucket:'colony-d11f1.firebasestorage.app',
+      messagingSenderId:'327114538328',
+      appId:'1:327114538328:web:c82bb9db2035d68e04b92d',
+      databaseURL:'https://colony-d11f1-default-rtdb.europe-west1.firebasedatabase.app/',
+    };
+    if(!window.firebase){setSyncStatus('SYNC SDK MISSING',true);return;}
+    if(firebase.apps.length===0) firebase.initializeApp(cfg);
+    db=firebase.database();
+    firebaseReady=true;
+    setSyncStatus('SYNC READY',false);
+  }catch(e){
+    firebaseReady=false;
+    setSyncStatus('SYNC FAILED',true);
+  }
+}
+
+function canonicalSubmissions(arr){
+  const byRound={};
+  (arr||[]).forEach((s)=>{if(s&&s.round>=1&&s.round<=3) byRound[s.round]=s;});
+  return [1,2,3].map((r)=>byRound[r]).filter(Boolean);
+}
+
+function renderFeedbackForTeam(teamId){
+  const entries=canonicalSubmissions(allTeamSubmissions[teamId]||[]);
+  Object.keys(trajectoryCharts).forEach((k)=>{trajectoryCharts[k].destroy();delete trajectoryCharts[k];});
+  const c=document.getElementById('fb-container');
+  if(entries.length===0){
+    c.innerHTML='';
+    c.style.display='none';
+    document.getElementById('fb-empty').style.display='block';
+    return;
+  }
+  document.getElementById('fb-empty').style.display='none';
+  c.style.display='block';
+  c.innerHTML='';
+  entries.slice().reverse().forEach((sub)=>{
+    const reportId=++feedbackSeq;
+    c.innerHTML += buildFeedback(sub.result,sub.round,sub.teamId||teamId,sub.habitation,reportId);
+    renderTrajectoryChart(`traj-${reportId}`,sub.result);
+  });
+}
+
+function applyLocalTeamFromSubmissions(teamId){
+  const entries=canonicalSubmissions(allTeamSubmissions[teamId]||[]);
+  S.submissions=entries.slice();
+  if(entries.length===0){
+    S.round=1;
+    S.locked=[];
+    document.getElementById('submit-btn').disabled=true;
+    document.getElementById('submit-note').textContent='Complete all 4 slots to submit';
+  }else{
+    const v1=entries.find((s)=>s.round===1)||entries[0];
+    S.locked=(v1.selected||[]).slice(0,2);
+    S.round=Math.min(entries.length+1,3);
+    if(entries.length>=3){
+      document.getElementById('submit-btn').disabled=true;
+      document.getElementById('submit-note').textContent='Maximum 3 rounds reached';
+    }
+  }
+  renderRounds();
+  renderSlots();
+  renderBudget();
+  renderComparisonPanel();
+  renderFeedbackForTeam(teamId);
+}
+
+function applyRemoteState(data){
+  const meta=data?.meta||{};
+  const teams=data?.teams||{};
+  const remoteSub=data?.submissions||{};
+
+  if(meta.cap!==undefined){
+    cargoCapacity=parseMu(meta.cap,cargoCapacity);
+    document.getElementById('cargo-cap-input').value=formatMu(cargoCapacity);
+    onCapacityChange();
+  }
+
+  teacherBudgets={};
+  teacherTokenMap={};
+  const teamEntries=Object.keys(teams).map((teamId)=>({
+    teamId:String(teamId).toUpperCase(),
+    budget:parseMu(teams[teamId]?.budget,12),
+    token:String(teams[teamId]?.token||'').toUpperCase()
+  }));
+  teamEntries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;if(e.token) teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
+  if(accessState.role==='teacher'){
+    teacherSlots=Math.max(4,teamEntries.length);
+    for(let i=0;i<teamEntries.length;i++){
+      window['_tid_'+i]=teamEntries[i].teamId;
+      window['_tbud_'+i]=teamEntries[i].budget;
+      window['_ttok_'+i]=teamEntries[i].token;
+    }
+    renderTeamSlots();
+  }
+
+  const parsedSubs={};
+  Object.keys(remoteSub).forEach((teamId)=>{
+    const vals=Object.values(remoteSub[teamId]||{});
+    parsedSubs[String(teamId).toUpperCase()]=canonicalSubmissions(vals);
+  });
+  allTeamSubmissions=parsedSubs;
+  renderClassOverview();
+
+  if(accessState.role==='student' && accessState.token && teacherTokenMap[accessState.token]){
+    const cfg=teacherTokenMap[accessState.token];
+    accessState.teamId=cfg.teamId;
+    document.getElementById('team-id').value=cfg.teamId;
+    document.getElementById('budget-sel').value=formatMu(Math.min(cfg.budget,cargoCapacity));
+  }
+  onTeamIdChange();
+
+  const activeTeam=getTeamIdInput();
+  if(activeTeam && allTeamSubmissions[activeTeam]){
+    applyLocalTeamFromSubmissions(activeTeam);
+  }else if(accessState.role==='student' && accessState.teamId){
+    applyLocalTeamFromSubmissions(accessState.teamId);
+  }
+}
+
+function startSessionSync(){
+  if(!firebaseReady||!db) return;
+  if(currentSessionRef) currentSessionRef.off();
+  currentSessionRef=db.ref(`sessions/${sessionId}`);
+  currentSessionRef.on('value',(snap)=>applyRemoteState(snap.val()||{}));
+  setSyncStatus(`SYNC LIVE: ${sessionId}`,false);
+}
+
+function publishTeacherConfig(entries){
+  if(!firebaseReady||!currentSessionRef) return;
+  const teams={};
+  entries.forEach((e)=>{teams[e.teamId]={budget:e.budget,token:e.token};});
+  currentSessionRef.child('meta').update({cap:cargoCapacity,updatedAt:Date.now()});
+  currentSessionRef.child('teams').set(teams);
+}
+
 function setTeacherButtonVisibility(show){
   document.getElementById('teacher-open-btn').classList.toggle('hidden',!show);
 }
@@ -1127,6 +1291,10 @@ function unlockTeacherAccess(){
   }
   showAccessMessage('teacher-access-msg','Access granted',false);
   enterApp('teacher');
+  document.getElementById('team-id').readOnly=false;
+  document.getElementById('budget-sel').readOnly=false;
+  document.getElementById('session-id-input').readOnly=false;
+  onSessionIdChange();
   document.getElementById('pin-input').value=TEACHER_PIN;
   checkPin();
   openTeacher();
@@ -1144,6 +1312,9 @@ function unlockStudentAccess(){
     showAccessMessage('student-access-msg','Invalid package format',true);
     return;
   }
+  sessionId=normalizeSessionId(parsed.sessionId||parsed.session||sessionId);
+  document.getElementById('session-id-input').value=sessionId;
+  if(firebaseReady) startSessionSync();
   const teamCfg=parsed.teams.find((t)=>String(t.token||'').toUpperCase()===token);
   if(!teamCfg){
     showAccessMessage('student-access-msg','Token not found in this package',true);
@@ -1168,9 +1339,16 @@ function unlockStudentAccess(){
   document.getElementById('team-id').readOnly=true;
   document.getElementById('budget-sel').value=formatMu(Math.min(teamBudget,cargoCapacity));
   document.getElementById('budget-sel').readOnly=true;
+  document.getElementById('session-id-input').readOnly=true;
   onTeamIdChange();
   showAccessMessage('student-access-msg',`Access granted for ${teamId}`,false);
   enterApp('student');
+}
+
+function onSessionIdChange(){
+  sessionId=normalizeSessionId(document.getElementById('session-id-input').value);
+  document.getElementById('session-id-input').value=sessionId;
+  if(firebaseReady) startSessionSync();
 }
 
 function getTeamIdInput(){
@@ -1579,14 +1757,8 @@ function onTeamIdChange(){
 function submitProposal(){
   const team=getTeamIdInput();
   const result=simulate(S.selected);
-  const reportId=++feedbackSeq;
-  const html=buildFeedback(result,S.round,team,S.habitation,reportId);
-  document.getElementById('fb-empty').style.display='none';
-  const c=document.getElementById('fb-container');
-  c.style.display='block';
-  c.innerHTML=html+c.innerHTML;
-  renderTrajectoryChart(`traj-${reportId}`,result);
   const submission={
+    id:`sub-${Date.now()}-${Math.floor(Math.random()*100000)}`,
     teamId:team,
     round:S.round,
     selected:[...S.selected],
@@ -1595,19 +1767,26 @@ function submitProposal(){
     result,
     submittedAt:new Date().toISOString(),
   };
-  S.submissions.push(submission);
   if(!allTeamSubmissions[team]) allTeamSubmissions[team]=[];
-  allTeamSubmissions[team].push(submission);
+  allTeamSubmissions[team]=canonicalSubmissions([...allTeamSubmissions[team].filter((s)=>s.round!==submission.round),submission]);
+  applyLocalTeamFromSubmissions(team);
+  if(firebaseReady&&currentSessionRef){
+    currentSessionRef.child('submissions').child(team).child(submission.id).set(submission);
+  }
   if(S.round===1) S.locked=S.selected.slice(0,2);
   if(S.round<3) S.round++;
   else{document.getElementById('submit-btn').disabled=true;document.getElementById('submit-note').textContent='Maximum 3 rounds reached';}
-  renderRounds();renderSlots();renderClassOverview();renderComparisonPanel();
+  renderClassOverview();renderComparisonPanel();
   showSec('feedback');
   showToast(`PROPOSAL V${S.submissions.length} SUBMITTED`);
 }
 
 function clearTeamSubmissions(teamId){
+  if(accessState.role!=='teacher'){showToast('TEACHER ACCESS REQUIRED','err');return;}
   if(!confirm(`Clear all submissions for ${teamId}?`)) return;
+  if(firebaseReady&&currentSessionRef){
+    currentSessionRef.child('submissions').child(teamId).remove();
+  }
   delete allTeamSubmissions[teamId];
   const reports=[...document.querySelectorAll('.fb-report')];
   reports.forEach((report)=>{
@@ -1638,7 +1817,11 @@ function clearTeamSubmissions(teamId){
 }
 
 function clearAllClassroomData(){
+  if(accessState.role!=='teacher'){showToast('TEACHER ACCESS REQUIRED','err');return;}
   if(!confirm('Clear all classroom data? This resets teams, submissions, and Sol counter.')) return;
+  if(firebaseReady&&currentSessionRef){
+    currentSessionRef.remove();
+  }
   Object.keys(trajectoryCharts).forEach((k)=>{trajectoryCharts[k].destroy();delete trajectoryCharts[k];});
   allTeamSubmissions={};
   teacherBudgets={};
@@ -1654,9 +1837,13 @@ function clearAllClassroomData(){
   document.getElementById('team-display').textContent='TEAM: —';
   document.getElementById('budget-sel').value='12';
   document.getElementById('budget-sel').readOnly=false;
+  document.getElementById('session-id-input').readOnly=false;
   document.getElementById('cargo-cap-input').value='13';
   document.getElementById('cargo-cap-status').textContent='ACTIVE';
   document.getElementById('pkg-output').value='';
+  document.getElementById('session-id-input').value='lesson7-live';
+  sessionId='lesson7-live';
+  if(firebaseReady) startSessionSync();
   document.getElementById('teacher-budget-note').style.display='none';
   document.querySelectorAll('.hab-opt').forEach((e)=>e.classList.remove('selected'));
   document.getElementById('crit-risk').value='';
@@ -1773,6 +1960,7 @@ function broadcastBudgets(){
     return;
   }
   entries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
+  publishTeacherConfig(entries);
   const lines=Object.entries(teacherBudgets).map(([k,v])=>`${k}: ${formatMu(v)} MU`).join(' · ');
   document.getElementById('broadcast-info').textContent=`ACTIVE CAP: ${formatMu(cargoCapacity)} MU | ${lines||'No teams configured'} — Students will be auto-assigned via access token package.`;
   const base='BUDGETS BROADCAST TO '+(Object.keys(teacherBudgets).length)+' TEAMS';
@@ -1795,7 +1983,8 @@ function generateAccessPackage(){
   teacherBudgets={};
   teacherTokenMap={};
   entries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
-  const pkg=encodePackage({v:1,cap:cargoCapacity,issuedAt:new Date().toISOString(),teams:entries});
+  publishTeacherConfig(entries);
+  const pkg=encodePackage({v:2,sessionId,cap:cargoCapacity,issuedAt:new Date().toISOString(),teams:entries});
   document.getElementById('pkg-output').value=pkg;
   document.getElementById('student-package').value=pkg;
   const base='ACCESS PACKAGE GENERATED';
@@ -1881,6 +2070,8 @@ function showToast(msg,type){
 // ═══════════════════════════
 function init(){
   setTeacherButtonVisibility(false);
+  initFirebase();
+  onSessionIdChange();
   onCapacityChange();
   S.budget=parseMu(document.getElementById('budget-sel').value,S.budget);
   document.getElementById('student-token').addEventListener('keydown',(e)=>{if(e.key==='Enter') unlockStudentAccess();});

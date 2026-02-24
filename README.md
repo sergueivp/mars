@@ -31,3 +31,13 @@ Open `index.html` in a browser.
 - Teacher clicks `GENERATE PACKAGE` and shares the package string with students.
 - Student pastes package + team token in the gate.
 - Students using the same token are assigned the same team and MU setup.
+
+## Realtime sync (Firebase RTDB)
+
+- Session data syncs under `sessions/<session-id>`.
+- Teacher actions (`broadcast`, `generate package`, `clear team`, `clear all`) propagate to all connected instances.
+- Team submissions sync live across devices.
+
+## Security note
+
+- Current DB rules are open read/write. This is convenient for testing but not secure for production.
