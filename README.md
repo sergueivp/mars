@@ -21,5 +21,13 @@ Open `index.html` in a browser.
 
 - Teacher sets `SPACECRAFT TOTAL CAPACITY (MU)` in Teacher Dashboard.
 - Teacher enters each team's MU budget manually and broadcasts.
-- Team budget in Proposal is numeric and can be entered manually if no broadcast match.
+- Team budget in Proposal is numeric.
 - Any team budget above spacecraft capacity is capped automatically.
+
+## Access token workflow
+
+- Students cannot access the app until they pass the access gate.
+- Teacher enters as teacher with PIN, then configures `TEAM ID + MU + TOKEN`.
+- Teacher clicks `GENERATE PACKAGE` and shares the package string with students.
+- Student pastes package + team token in the gate.
+- Students using the same token are assigned the same team and MU setup.
