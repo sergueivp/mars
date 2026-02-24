@@ -113,6 +113,21 @@ Owning excavator/rover does not bypass this when Surface is selected.
 - Two weakest areas (plain language)
 - Two diagnostics (plain language, no item IDs)
 
+## Fail-Day and Power Consistency Patch
+- Non-transport failures are no longer allowed at Sol 0.
+  - Transport failure can still fail at Sol 0.
+  - Other failure checks are floored to Sol 30+ unless explicitly defined (for example Surface radiation emergency at Sol 27).
+- Reliability hard-failure now uses internal ER timeline (`0..100`) instead of BC `0..5` scoring.
+  - BC display remains in `0..5`, derived from ER at Sol 0 (`ER/20`).
+- Power draw now includes always-on base load:
+  - `core_load = 4.0 kW`
+  - plus habitation thermal load
+  - plus active item draws at each checkpoint.
+- Power summary (Sol 180) and playback values now use the same source:
+  - `powerTimeline[{sol, genKW, drawKW, netKW, deficit}]`
+- Critical-event header is now mapped by failure category:
+  - Transport / Energy Stability / Radiation / Water-Oxygen / Repairs & Breakdown Risk.
+
 ## Deterministic Fixture Checks
 - Added built-in deterministic fixtures via `runDeterministicFixtures()`.
 - Run automatically when URL contains `?sim-fixtures=1`.
