@@ -1274,9 +1274,10 @@ function buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavato
     if(has(2)&&!has(3)&&sol>=60) erLoss += 2;
     er = clamp(er-erLoss,0,100);
 
-    if(er<30 && block>0){
+    if(er<30 && block>0 && sol>=60){
       ls = clamp(ls-(5*(block/30)),0,100);
       ps = clamp(ps-(3*(block/30)),0,100);
+      keyEvents.push({sol,type:'reliability',outcome:'warn',reason:'Breakdown risk increasing.'});
     }
 
     cs = clamp((ls*0.45)+(ps*0.2)+(er*0.2)+(rs*0.15)+(has(16)?3:-2)+(has(17)?2:-2),0,100);
@@ -1489,7 +1490,7 @@ function simulate(ids,habitation,budget){
   };
 
   Object.keys(sc).forEach((k)=>{
-    if(k==='BC' || k==='ES') return; // ES hard-failure uses timeline PS checks from Sol 60+.
+    if(k==='BC' || k==='ES' || k==='EP') return; // EP/ES hard-failure use timeline checks from Sol 60+.
     if(k==='RS' && habitationUsed!=='surface') return; // avoid surface-radiation hard-fail logic on non-surface plans.
     if(sc[k]<THRESH[k]){
       const d=Math.max(30,Math.round(((sc[k]-FLOORS[k])/.2)*15));
@@ -1499,10 +1500,6 @@ function simulate(ids,habitation,budget){
 
   const timelinePack=buildMissionTimelines(normalizedIds,habitationUsed,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
   const sol180=timelinePack.powerTimeline.find((x)=>x.sol===180) || {pOut:0,pDraw:0,genKW:0,drawKW:0,deficit:0,net:0,netKW:0};
-  const erCritical=timelinePack.erTimeline.find((x)=>x.sol>=30 && x.ER<40);
-  if(erCritical){
-    setFail(erCritical.sol,'BC','Repairs & breakdown risk is projected to become critical',false);
-  }
   const timelinePower=timelinePack.powerTimeline || [];
   for(let i=1;i<timelinePower.length;i++){
     const prev=timelinePower[i-1];
@@ -1514,9 +1511,24 @@ function simulate(ids,habitation,budget){
       break;
     }
   }
+  const timelineRad=timelinePack.radiationTimeline || [];
+  for(let i=1;i<timelineRad.length;i++){
+    const prev=timelineRad[i-1];
+    const cur=timelineRad[i];
+    if((cur.sol??0)<60) continue;
+    if((prev.sol??0)<60) continue;
+    if(Number(prev.RS)<35 && Number(cur.RS)<35){
+      setFail(cur.sol,'EP','Environmental protection collapses under sustained radiation stress',false);
+      break;
+    }
+  }
+  const doseCritical=timelineRad.find((x)=>Number(x.sol)<180 && Number(x.cumDose)>180);
+  if(doseCritical){
+    setFail(doseCritical.sol,'EP','Radiation exposure exceeds mission safety limits',false);
+  }
 
   if(habitationUsed==='surface' && printerCompletedAt===null){
-    setFail(30,'RS','Surface radiation overload (no effective shielding)',false);
+    setFail(27,'RS','Surface radiation overload (no effective shielding)',true);
   }
   if(has(2)&&!has(3)) setFail(60,'ES','Solar output degrades without dust control',false);
   if(!has(9)) setFail(45,'CS','Oxygen supply is limited. Crew runs out around Sol 45.',false);
@@ -1606,10 +1618,12 @@ function runDeterministicFixtures(){
   assert('Printer duty-cycle draw schedule is applied',Math.abs((printerSol0.drawKW||0)-10.0)<0.01 && Math.abs((printerSol30.drawKW||0)-14.0)<0.01 && Math.abs((printerSol60.drawKW||0)-12.0)<0.01 && Math.abs((printerSol90.drawKW||0)-10.0)<0.01,`sol0=${printerSol0.drawKW} sol30=${printerSol30.drawKW} sol60=${printerSol60.drawKW} sol90=${printerSol90.drawKW}`);
   assert('Habitation requested partial with printer remains partial',printerCombo.habitationRequested==='partial' && printerCombo.habitationUsed==='partial',`requested=${printerCombo.habitationRequested} used=${printerCombo.habitationUsed}`);
   assert('Partial + printer does not trigger surface radiation emergency',!/Surface radiation overload/i.test(printerCombo.failReason||''),`failReason=${printerCombo.failReason||''}`);
+  assert('EP hard-fail is not evaluated at Sol 30',!(printerCombo.failIdx==='EP' && printerCombo.failDay===30),`failIdx=${printerCombo.failIdx||''} failDay=${printerCombo.failDay}`);
   const comboSol180=(tCombo.powerTimeline||[]).find((x)=>x.sol===180)||{};
   assert('Power summary source-of-truth matches Sol 180 timeline',tCombo.pOut===comboSol180.genKW && tCombo.pDraw===comboSol180.drawKW && tCombo.deficit===comboSol180.deficit,`pOut=${tCombo.pOut} tlOut=${comboSol180.genKW} pDraw=${tCombo.pDraw} tlDraw=${comboSol180.drawKW}`);
   const bcDisplay=getDisplayIndexScore(tCombo,'BC');
   assert('BC display uses internal ER (0..100) converted to 0..5',bcDisplay>=3.2 && bcDisplay<=3.8,`bcDisplay=${bcDisplay}`);
+  assert('ER never sets hard fail',tCombo.failIdx!=='BC' && !/Repairs \\& breakdown risk/i.test(tCombo.failReason||''),`failIdx=${tCombo.failIdx||''} reason=${tCombo.failReason||''}`);
   assert('Fail category label maps reliability correctly',getFailCategoryLabel({failIdx:'BC',failReason:'Backup & Repair projected to fail',transportStatus:'OK'})==='REPAIRS & BREAKDOWN RISK',`label=${getFailCategoryLabel({failIdx:'BC',failReason:'Backup & Repair projected to fail',transportStatus:'OK'})}`);
 
   const uiGate=getSubmissionGateState([1,4,8,9],'surface',10,0);
