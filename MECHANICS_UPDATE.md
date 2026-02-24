@@ -30,7 +30,7 @@
 - Overweight handling:
   - `MU_total / MU_budget <= 1.00`: normal
   - `1.00 < ratio <= 1.15`: accepted with transport risk
-  - `ratio > 1.15`: invalid submission (`Overweight exceeds 15% limit`)
+  - `ratio > 1.15`: accepted, but deterministic transport failure at Sol 0
 - Transport Feasibility (`TF`) in `[0..100]`:
   - Overweight penalty: `TF_penalty = 4 * overweight_pct`
   - Status bands:
@@ -40,6 +40,56 @@
 - `AT RISK` applies deterministic startup penalties:
   - reduced reserve benefit for `item_19` and `item_20` (50%)
   - ES start stress equivalent to PS_0=92
+
+## Habitation Strategy Effects
+- Habitation changes only three mechanical domains:
+  - radiation exposure
+  - thermal load added to power draw
+  - base mechanical wear
+
+### Radiation multipliers
+- Surface: `1.00`
+- Partial subsurface: `0.65`
+- Fully subsurface: `0.35`
+
+Radiation multiplier is driven by selected habitation strategy only.
+Owning enabler items does not automatically grant subsurface radiation protection.
+
+### Thermal load
+- Base thermal load:
+  - Surface: `2.0 kW`
+  - Partial: `1.0 kW`
+  - Full: `0.5 kW`
+- Thermal Regulation (`item_11`) reduction:
+  - Surface: `-1.0 kW`
+  - Partial: `-0.6 kW`
+  - Full: `-0.3 kW`
+- Thermal load is clamped to a minimum of `0.2 kW`.
+
+This thermal load is added to checkpoint draw at every checkpoint.
+
+### Habitation wear (ER)
+- Added deterministic wear per 30-sol block:
+  - Surface: `+2`
+  - Partial: `+1`
+  - Full: `+0`
+
+This stacks with existing wear from dust, seals, and power stress.
+
+### Surface emergency rule
+- If strategy is Surface and printer shielding is not completed by Sol 60:
+  - hard failure at Sol 27
+  - reason: `Surface radiation overload (no effective shielding)`
+
+Owning excavator/rover does not bypass this when Surface is selected.
+
+### Playback and feedback visibility
+- Mission playback now shows at each checkpoint:
+  - habitat status line with icon
+  - radiation risk as LOW / MEDIUM / HIGH
+- Sol 0 event added:
+  - `Habitation plan selected: Surface / Partial / Full.`
+- Feedback summary includes a one-line habitation consequence statement.
 
 ## Oxygen/Water Duration Feedback
 - Oxygen:
@@ -71,5 +121,5 @@
   - printer deficit no-completion path
   - adequate printer completion path
   - overweight acceptance in +15% band
-  - invalid submission above +15%
+  - transport failure at Sol 0 above +15%
   - TF status mapping for `< 40`.
