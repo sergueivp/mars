@@ -397,11 +397,6 @@ select.inp{cursor:pointer}
             <input class="inp" id="session-id-input" type="text" value="lesson7-live" oninput="onSessionIdChange()">
             <span id="session-sync-status" style="font-family:var(--font-mono);font-size:9px;color:var(--text-3);padding-top:10px">SYNC OFF</span>
           </div>
-          <div class="team-row" style="grid-template-columns:1fr 160px 80px;margin-bottom:10px">
-            <div class="inp-lbl" style="margin-bottom:0;padding-top:10px">SPACECRAFT TOTAL CAPACITY (MU)</div>
-            <input class="inp" id="cargo-cap-input" type="number" min="0" step="0.5" value="13" oninput="onCapacityChange()">
-            <span id="cargo-cap-status" style="font-family:var(--font-mono);font-size:9px;color:var(--text-3);padding-top:10px">ACTIVE</span>
-          </div>
           <div class="team-row-hdr">
             <div>TEAM ID</div><div>BUDGET</div><div>TOKEN</div>
           </div>
@@ -685,7 +680,7 @@ select.inp{cursor:pointer}
       <div class="g3" style="gap:16px">
         <div class="rule-box">
           <div class="rule-label">CARGO SYSTEM</div>
-          <div class="rule-text">Each item carries a defined <strong>Mass Unit (MU)</strong> cost. Your team MU budget is assigned manually by mission command (for example from accumulated course points) and constrained by spacecraft capacity. Select exactly <strong>4 items</strong>. Total MU must not exceed your budget.</div>
+          <div class="rule-text">Each item carries a defined <strong>Mass Unit (MU)</strong> cost. Your team MU budget is assigned manually by mission command (for example from accumulated course points). For each team, that budget is the transport capacity limit for its proposal. Select exactly <strong>4 items</strong>. Total MU must not exceed your budget.</div>
         </div>
         <div class="rule-box">
           <div class="rule-label">REVISION PROTOCOL</div>
@@ -951,7 +946,6 @@ function createInitialState(){
 let S = createInitialState();
 let teacherBudgets = {}; // team-id → budget
 let teacherSlots = 0;
-let cargoCapacity = 13;
 let teacherTokenMap = {}; // token -> {teamId,budget}
 let allTeamSubmissions = {};
 let solState = { current:1, timerId:null, max:180 };
@@ -1186,15 +1180,8 @@ function applyLocalTeamFromSubmissions(teamId){
 }
 
 function applyRemoteState(data){
-  const meta=data?.meta||{};
   const teams=data?.teams||{};
   const remoteSub=data?.submissions||{};
-
-  if(meta.cap!==undefined){
-    cargoCapacity=parseMu(meta.cap,cargoCapacity);
-    document.getElementById('cargo-cap-input').value=formatMu(cargoCapacity);
-    onCapacityChange();
-  }
 
   teacherBudgets={};
   teacherTokenMap={};
@@ -1226,7 +1213,7 @@ function applyRemoteState(data){
     const cfg=teacherTokenMap[accessState.token];
     accessState.teamId=cfg.teamId;
     document.getElementById('team-id').value=cfg.teamId;
-    document.getElementById('budget-sel').value=formatMu(Math.min(cfg.budget,cargoCapacity));
+    document.getElementById('budget-sel').value=formatMu(cfg.budget);
   }
   onTeamIdChange();
 
@@ -1250,7 +1237,7 @@ function publishTeacherConfig(entries){
   if(!firebaseReady||!currentSessionRef) return;
   const teams={};
   entries.forEach((e)=>{teams[e.teamId]={budget:e.budget,token:e.token};});
-  currentSessionRef.child('meta').update({cap:cargoCapacity,updatedAt:Date.now()});
+  currentSessionRef.child('meta').update({updatedAt:Date.now()});
   currentSessionRef.child('teams').set(teams);
 }
 
@@ -1320,10 +1307,6 @@ function unlockStudentAccess(){
     showAccessMessage('student-access-msg','Token not found in this package',true);
     return;
   }
-  cargoCapacity=parseMu(parsed.cap,cargoCapacity);
-  document.getElementById('cargo-cap-input').value=formatMu(cargoCapacity);
-  onCapacityChange();
-
   const teamId=String(teamCfg.teamId||'').toUpperCase()||'—';
   const teamBudget=parseMu(teamCfg.budget,12);
   teacherBudgets[teamId]=teamBudget;
@@ -1337,7 +1320,7 @@ function unlockStudentAccess(){
   document.getElementById('teacher-content').style.display='none';
   document.getElementById('team-id').value=teamId;
   document.getElementById('team-id').readOnly=true;
-  document.getElementById('budget-sel').value=formatMu(Math.min(teamBudget,cargoCapacity));
+  document.getElementById('budget-sel').value=formatMu(teamBudget);
   document.getElementById('budget-sel').readOnly=true;
   document.getElementById('session-id-input').readOnly=true;
   onTeamIdChange();
@@ -1719,22 +1702,7 @@ function clearSel(){S.selected=S.selected.filter(id=>S.locked.includes(id));upda
 function selHab(type,el){S.habitation=type;document.querySelectorAll('.hab-opt').forEach(e=>e.classList.remove('selected'));el.classList.add('selected');renderBudget();}
 function onBudgetChange(){
   S.budget=parseMu(document.getElementById('budget-sel').value,S.budget);
-  if(cargoCapacity>0 && S.budget>cargoCapacity){
-    S.budget=cargoCapacity;
-    document.getElementById('budget-sel').value=formatMu(S.budget);
-    showToast(`BUDGET CAPPED TO SPACECRAFT LIMIT (${formatMu(cargoCapacity)} MU)`,'err');
-  }
   renderBudget();
-}
-function onCapacityChange(){
-  cargoCapacity=parseMu(document.getElementById('cargo-cap-input').value,cargoCapacity);
-  document.getElementById('cargo-cap-input').value=formatMu(cargoCapacity);
-  document.getElementById('cargo-cap-status').textContent=`CAP ${formatMu(cargoCapacity)} MU`;
-  if(S.budget>cargoCapacity){
-    S.budget=cargoCapacity;
-    document.getElementById('budget-sel').value=formatMu(S.budget);
-    renderBudget();
-  }
 }
 function onTeamIdChange(){
   const tidRaw=document.getElementById('team-id').value.trim().toUpperCase();
@@ -1827,7 +1795,6 @@ function clearAllClassroomData(){
   teacherBudgets={};
   teacherTokenMap={};
   teacherSlots=0;
-  cargoCapacity=13;
   feedbackSeq=0;
   Object.keys(window).forEach((k)=>{if(k.startsWith('_tid_')||k.startsWith('_tbud_')||k.startsWith('_ttok_')) delete window[k];});
   S=createInitialState();
@@ -1838,8 +1805,6 @@ function clearAllClassroomData(){
   document.getElementById('budget-sel').value='12';
   document.getElementById('budget-sel').readOnly=false;
   document.getElementById('session-id-input').readOnly=false;
-  document.getElementById('cargo-cap-input').value='13';
-  document.getElementById('cargo-cap-status').textContent='ACTIVE';
   document.getElementById('pkg-output').value='';
   document.getElementById('session-id-input').value='lesson7-live';
   sessionId='lesson7-live';
@@ -1905,7 +1870,6 @@ function renderTeamSlots(){
   if(!teacherUnlocked) return;
   const el=document.getElementById('team-slots');
   if(teacherSlots===0) teacherSlots=4;
-  onCapacityChange();
   let html='';
   for(let i=0;i<teacherSlots;i++){
     const current=parseMu(window['_tbud_'+i],12);
@@ -1922,17 +1886,12 @@ function addTeamSlot(){teacherSlots++;renderTeamSlots();}
 
 function collectTeamAllocations(){
   const entries=[];
-  let cappedCount=0;
   const seenTokens=new Set();
   const duplicateTokens=new Set();
   for(let i=0;i<teacherSlots;i++){
     const teamId=(document.getElementById('tid-'+i)?.value||'').trim().toUpperCase();
-    let budget=parseMu(document.getElementById('tbud-'+i)?.value,12);
+    const budget=parseMu(document.getElementById('tbud-'+i)?.value,12);
     const token=((document.getElementById('ttok-'+i)?.value||'').trim().toUpperCase()) || `TEAM-${i+1}`;
-    if(cargoCapacity>0 && budget>cargoCapacity){
-      budget=cargoCapacity;
-      cappedCount++;
-    }
     window['_tid_'+i]=teamId;
     window['_tbud_'+i]=budget;
     window['_ttok_'+i]=token;
@@ -1946,15 +1905,14 @@ function collectTeamAllocations(){
       entries.push({teamId,budget,token});
     }
   }
-  return {entries,cappedCount,duplicateTokens:[...duplicateTokens]};
+  return {entries,duplicateTokens:[...duplicateTokens]};
 }
 
 function broadcastBudgets(){
   if(!teacherUnlocked) return;
-  onCapacityChange();
   teacherBudgets={};
   teacherTokenMap={};
-  const {entries,cappedCount,duplicateTokens}=collectTeamAllocations();
+  const {entries,duplicateTokens}=collectTeamAllocations();
   if(duplicateTokens.length){
     showToast(`DUPLICATE TOKEN(S): ${duplicateTokens.join(', ')}`,'err');
     return;
@@ -1962,16 +1920,15 @@ function broadcastBudgets(){
   entries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
   publishTeacherConfig(entries);
   const lines=Object.entries(teacherBudgets).map(([k,v])=>`${k}: ${formatMu(v)} MU`).join(' · ');
-  document.getElementById('broadcast-info').textContent=`ACTIVE CAP: ${formatMu(cargoCapacity)} MU | ${lines||'No teams configured'} — Students will be auto-assigned via access token package.`;
+  document.getElementById('broadcast-info').textContent=`ACTIVE: ${lines||'No teams configured'} — Students will be auto-assigned via access token package.`;
   const base='BUDGETS BROADCAST TO '+(Object.keys(teacherBudgets).length)+' TEAMS';
-  showToast(cappedCount>0?`${base} — ${cappedCount} CAPPED TO LIMIT`:base,cappedCount>0?'err':undefined);
+  showToast(base);
   closeTeacher();
 }
 
 function generateAccessPackage(){
   if(!teacherUnlocked) return;
-  onCapacityChange();
-  const {entries,cappedCount,duplicateTokens}=collectTeamAllocations();
+  const {entries,duplicateTokens}=collectTeamAllocations();
   if(duplicateTokens.length){
     showToast(`DUPLICATE TOKEN(S): ${duplicateTokens.join(', ')}`,'err');
     return;
@@ -1984,11 +1941,11 @@ function generateAccessPackage(){
   teacherTokenMap={};
   entries.forEach((e)=>{teacherBudgets[e.teamId]=e.budget;teacherTokenMap[e.token]={teamId:e.teamId,budget:e.budget};});
   publishTeacherConfig(entries);
-  const pkg=encodePackage({v:2,sessionId,cap:cargoCapacity,issuedAt:new Date().toISOString(),teams:entries});
+  const pkg=encodePackage({v:2,sessionId,issuedAt:new Date().toISOString(),teams:entries});
   document.getElementById('pkg-output').value=pkg;
   document.getElementById('student-package').value=pkg;
   const base='ACCESS PACKAGE GENERATED';
-  showToast(cappedCount>0?`${base} — ${cappedCount} BUDGET(S) CAPPED`:base,cappedCount>0?'err':undefined);
+  showToast(base);
 }
 // close on overlay click
 document.getElementById('teacher-modal').addEventListener('click',function(e){if(e.target===this) closeTeacher();});
@@ -2072,7 +2029,6 @@ function init(){
   setTeacherButtonVisibility(false);
   initFirebase();
   onSessionIdChange();
-  onCapacityChange();
   S.budget=parseMu(document.getElementById('budget-sel').value,S.budget);
   document.getElementById('student-token').addEventListener('keydown',(e)=>{if(e.key==='Enter') unlockStudentAccess();});
   document.getElementById('teacher-gate-pin').addEventListener('keydown',(e)=>{if(e.key==='Enter') unlockTeacherAccess();});

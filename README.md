@@ -19,10 +19,9 @@ Open `index.html` in a browser.
 
 ## MU workflow (manual mode)
 
-- Teacher sets `SPACECRAFT TOTAL CAPACITY (MU)` in Teacher Dashboard.
 - Teacher enters each team's MU budget manually and broadcasts.
 - Team budget in Proposal is numeric.
-- Any team budget above spacecraft capacity is capped automatically.
+- Each team's budget is its own effective spacecraft capacity for that team.
 
 ## Access token workflow
 
