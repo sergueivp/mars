@@ -16,35 +16,30 @@ COMBOS = [
         "name": "Build Underground + Stable Life Support",
         "items": [1, 4, 8, 9],
         "habitation": "subsurface",
-        "fallback": "surface",
     },
     {
         "id": "B",
         "name": "Print Shielding + Stable Life Support",
         "items": [1, 7, 8, 9],
         "habitation": "partial",
-        "fallback": "partial",
     },
     {
         "id": "C",
         "name": "Reliability-First Survival",
         "items": [1, 8, 9, 13],
         "habitation": "partial",
-        "fallback": "surface",
     },
     {
         "id": "D",
         "name": "Thermal + Life Support",
         "items": [1, 11, 8, 9],
         "habitation": "partial",
-        "fallback": "surface",
     },
     {
         "id": "E",
         "name": "Solar Path Probe",
         "items": [2, 3, 8, 7],
         "habitation": "partial",
-        "fallback": "partial",
     },
 ]
 
@@ -128,22 +123,9 @@ function extractScript(html){
   return m[1];
 }
 
-function isHabAllowed(hab, items){
-  const has=function(id){return items.indexOf(id)!==-1;};
-  if(hab==='subsurface') return has(4) || has(5);
-  if(hab==='partial') return has(4) || has(7);
-  return true;
-}
-
 function selectHabitation(tc){
-  let notes=[];
-  let hab=(tc.habitation||'surface').toLowerCase();
-  if(!isHabAllowed(hab, tc.items)){
-    const fb=(tc.fallback||'surface').toLowerCase();
-    notes.push('gating issue: '+hab+' not allowed for selected items; fallback to '+fb);
-    hab=fb;
-  }
-  return {hab:hab, notes:notes};
+  const requested=(tc.habitation||'surface').toLowerCase();
+  return {hab:requested, notes:[]};
 }
 
 function getAtOrBefore(arr, sol, key){
@@ -212,7 +194,7 @@ function runReport(payload){
         comboName:tc.name,
         items:tc.items.slice(),
         habitationRequested:tc.habitation,
-        habitationUsed:pick.hab,
+        habitationUsed:result.habitationUsed||result.habitation||pick.hab,
         notes:pick.notes.slice(),
         muBudget:Number(budget),
         muTotal:Number(itemMu),
@@ -229,6 +211,9 @@ function runReport(payload){
         rawResult:result
       };
       if(result.invalid && result.invalidReason){
+        if(/partial subsurface|fully subsurface/i.test(result.invalidReason)){
+          entry.notes.push('gating issue: requested habitation does not meet enabler requirements');
+        }
         entry.notes.push('invalid: ' + result.invalidReason);
       }
       entry.hints=buildHints(entry);

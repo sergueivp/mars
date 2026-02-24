@@ -1165,7 +1165,16 @@ function getHabitationImpactText(hab){
 function getCheckpointDraw(ids,day,hab){
   let draw=CORE_LOAD_KW;
   ids.forEach((id)=>{
-    if((id===4||id===7) && day>CONSTRUCTION_WINDOW_MAX) return;
+    if(id===4){
+      if(day===0) draw+=4.0;
+      else if(day===30) draw+=3.0;
+      return;
+    }
+    if(id===7){
+      if(day===30) draw+=4.0;
+      else if(day===60) draw+=2.0;
+      return;
+    }
     draw+=IMODS[id].pDraw;
   });
   draw += getHabThermalLoad(hab,ids.includes(11));
@@ -1320,19 +1329,27 @@ function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
 function simulate(ids,habitation,budget){
   const normalizedIds=normalizeSelectedIds(ids);
   const has=id=>normalizedIds.includes(id);
-  const hab=(habitation||'surface').toLowerCase();
+  const habitationRequested=(habitation||'surface').toLowerCase();
+  const habitationUsed=habitationRequested;
   const muBudget=Math.max(0.01,parseMu(budget,12));
   const muTotal=getSelectedMu(normalizedIds);
   const muOver=muTotal/muBudget;
   const uniqueCount=normalizedIds.length;
   const validationReasons=[];
+  const partialGateFail=habitationUsed==='partial' && !(has(4)||has(7));
+  const fullGateFail=habitationUsed==='subsurface' && !(has(4)||has(5));
   if(uniqueCount!==4) validationReasons.push('Select exactly 4 equipment items');
   if(!habitation) validationReasons.push('Select a habitation strategy');
   if(has(10)&&!has(8)) validationReasons.push('Hydroponics requires water recycler');
-  if(hab==='partial' && !(has(4)||has(7))) validationReasons.push('Partial subsurface requires excavator or shielding printer');
-  if(hab==='subsurface' && !(has(4)||has(5))) validationReasons.push('Fully subsurface requires excavator or reconnaissance rover');
+  if(partialGateFail) validationReasons.push('Partial subsurface requires excavator or shielding printer');
+  if(fullGateFail) validationReasons.push('Fully subsurface requires excavator or reconnaissance rover');
   if(validationReasons.length){
-    return buildInvalidSubmission(normalizedIds,hab,muBudget,muTotal,muOver,validationReasons.join(' | '));
+    const invalidHabitationUsed=(partialGateFail||fullGateFail)?'surface':habitationUsed;
+    return {
+      ...buildInvalidSubmission(normalizedIds,invalidHabitationUsed,muBudget,muTotal,muOver,validationReasons.join(' | ')),
+      habitationRequested,
+      habitationUsed:invalidHabitationUsed,
+    };
   }
 
   const transportOutcome=getTransportOutcome(muTotal,muBudget);
@@ -1350,13 +1367,13 @@ function simulate(ids,habitation,budget){
       mv:1.0,viability100:20,resultLabel:'NON-VIABLE',status:'NON-VIABLE',
       failDay:0,failIdx:'ES',failReason:'Transport failure: spacecraft too heavy to reach Mars / land safely',
       pOut:0,pDraw:0,deficit:0,powerAt180:{day:180,pOut:0,pDraw:0,deficit:0,net:0},powerTimeline:[],
-      printerCompletedAt:null,excavatorReady:false,habitation:hab,
-      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+      printerCompletedAt:null,excavatorReady:false,habitation:habitationUsed,habitationRequested,habitationUsed,
+      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:habitationUsed==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
       weakestAreas:['Power stability','Water/oxygen systems'],
       diagnostics:['Reduce cargo mass before launch.','Balance mass and critical systems for safe transfer and landing.'],
       tf,transportStatus,muTotal,muBudget,muSoftLimit,muOver,
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
-      waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
+      waterDurationText:has(8)?'continuous':(has(19)?(habitationUsed==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:['Your spacecraft lifted off, but used too much fuel. It could not enter Mars orbit safely.'],
       radiationTimeline:[],lsTimeline:[],erTimeline:[],csTimeline:[],keyEvents,
     };
@@ -1371,8 +1388,8 @@ function simulate(ids,habitation,budget){
 
   CHECKPOINTS.forEach((day)=>{
     const pOut=getCheckpointGeneration(normalizedIds,day);
-    const pDraw=getCheckpointDraw(normalizedIds,day,hab);
-    const thermalKW=getHabThermalLoad(hab,has(11));
+    const pDraw=getCheckpointDraw(normalizedIds,day,habitationUsed);
+    const thermalKW=getHabThermalLoad(habitationUsed,has(11));
     const deficit=Math.max(0,Math.round((pDraw-pOut)*100)/100);
     const net=Math.round((pOut-pDraw)*100)/100;
     powerTimeline.push({sol:day,day,pOut,pDraw,genKW:pOut,drawKW:pDraw,thermalKW,deficit,net,netKW:net,PS:100});
@@ -1387,7 +1404,7 @@ function simulate(ids,habitation,budget){
     const sc={RS:1.0,ES:0.5,EP:1.0,BC:1.0,CS:0.8};
     const weakest=['Power stability','Water/oxygen systems'];
     const diagnostics=buildDiagnostics(weakest);
-    const timelinePack=buildMissionTimelines(normalizedIds,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
+    const timelinePack=buildMissionTimelines(normalizedIds,habitationUsed,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
     const sol180=timelinePack.powerTimeline.find((x)=>x.sol===180) || {pOut:0,pDraw:0,genKW:0,drawKW:0,deficit:0,net:0,netKW:0};
     const keyEvents=[{sol:0,type:'launch',outcome:'success'},{sol:0,type:'landing',outcome:'success'},...timelinePack.keyEvents];
     return {
@@ -1395,12 +1412,12 @@ function simulate(ids,habitation,budget){
       failDay:10,failIdx:'ES',failReason:'No primary power source (cannot run life support)',
       pOut:sol180.genKW,pDraw:sol180.drawKW,deficit:sol180.deficit,
       powerAt180:sol180,powerTimeline:timelinePack.powerTimeline,
-      printerCompletedAt:null,excavatorReady:false,habitation:hab,
-      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+      printerCompletedAt:null,excavatorReady:false,habitation:habitationUsed,habitationRequested,habitationUsed,
+      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:habitationUsed==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
       weakestAreas:weakest,diagnostics,
       tf,transportStatus,muTotal,muBudget,muSoftLimit,muOver,
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
-      waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
+      waterDurationText:has(8)?'continuous':(has(19)?(habitationUsed==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
       radiationTimeline:timelinePack.radiationTimeline,
       lsTimeline:timelinePack.lsTimeline,
@@ -1429,7 +1446,7 @@ function simulate(ids,habitation,budget){
   if(has(1)&&has(13)) sc.BC+=.5;
   if(has(14)&&!has(13)) sc.BC-=.7;
 
-  const habitationRS = hab==='surface' ? -0.4 : hab==='partial' ? 0.25 : 0.55;
+  const habitationRS = habitationUsed==='surface' ? -0.4 : habitationUsed==='partial' ? 0.25 : 0.55;
   sc.RS += habitationRS;
 
   if(has(7)&&printerCompletedAt!==null){
@@ -1438,7 +1455,7 @@ function simulate(ids,habitation,budget){
   }
   if(has(4)&&excavatorReady){
     sc.EP += IMODS[4].EP;
-    if(has(5)&&hab!=='surface'){
+    if(has(5)&&habitationUsed!=='surface'){
       sc.RS += sc.ES>=2.5?2.0:.5;
       sc.EP += sc.ES>=2.5?1.5:.3;
     }
@@ -1479,14 +1496,14 @@ function simulate(ids,habitation,budget){
     }
   });
 
-  const timelinePack=buildMissionTimelines(normalizedIds,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
+  const timelinePack=buildMissionTimelines(normalizedIds,habitationUsed,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
   const sol180=timelinePack.powerTimeline.find((x)=>x.sol===180) || {pOut:0,pDraw:0,genKW:0,drawKW:0,deficit:0,net:0,netKW:0};
   const erCritical=timelinePack.erTimeline.find((x)=>x.sol>=30 && x.ER<40);
   if(erCritical){
     setFail(erCritical.sol,'BC','Repairs & breakdown risk is projected to become critical',false);
   }
 
-  if(hab==='surface' && printerCompletedAt===null){
+  if(habitationUsed==='surface' && printerCompletedAt===null){
     setFail(30,'RS','Surface radiation overload (no effective shielding)',false);
   }
   if(has(2)&&!has(3)) setFail(60,'ES','Solar output degrades without dust control',false);
@@ -1500,7 +1517,7 @@ function simulate(ids,habitation,budget){
   const weaknessRank=Object.entries(sc).sort((a,b)=>a[1]-b[1]).slice(0,2).map(([k])=>WEAKNESS_LABELS[k]);
   const diagnostics=buildDiagnostics(weaknessRank);
   const oxygenDurationText=has(9)?'continuous':'until Sol 45';
-  const waterDurationText=has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90');
+  const waterDurationText=has(8)?'continuous':(has(19)?(habitationUsed==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90');
   const studentWarnings=[];
   if(transportAtRisk) studentWarnings.push('Overweight cargo reduced fuel/supplies; you start with fewer reserves.');
   if(!has(9)) studentWarnings.push('Oxygen supply is limited. Crew runs out around Sol 45.');
@@ -1513,8 +1530,8 @@ function simulate(ids,habitation,budget){
     failDay,failIdx,failReason,
     pOut:sol180.genKW,pDraw:sol180.drawKW,deficit:sol180.deficit,
     powerAt180:sol180,powerTimeline:timelinePack.powerTimeline,
-    printerCompletedAt,excavatorReady,habitation:hab,
-    hasSolar:has(2),hasDust:has(3),hasSub:excavatorReady&&hab!=='surface',hasHab:hab==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
+    printerCompletedAt,excavatorReady,habitation:habitationUsed,habitationRequested,habitationUsed,
+    hasSolar:has(2),hasDust:has(3),hasSub:excavatorReady&&habitationUsed!=='surface',hasHab:habitationUsed==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
     weakestAreas:weaknessRank,diagnostics,
     tf,transportStatus,muTotal,muBudget,muSoftLimit,muOver,
     oxygenDurationText,waterDurationText,studentWarnings,
@@ -1565,7 +1582,17 @@ function runDeterministicFixtures(){
 
   const tCombo=simulate([1,4,8,9],'subsurface',13);
   const comboSol0=(tCombo.powerTimeline||[]).find((x)=>x.sol===0)||{};
-  assert('Combo 01+04+08+09 draw at Sol 0 includes core+thermal+active loads',Math.abs((comboSol0.drawKW||0)-14.5)<0.01 && Math.abs((comboSol0.netKW||0)+4.5)<0.01,`draw=${comboSol0.drawKW} net=${comboSol0.netKW}`);
+  const comboSol30=(tCombo.powerTimeline||[]).find((x)=>x.sol===30)||{};
+  const comboSol60=(tCombo.powerTimeline||[]).find((x)=>x.sol===60)||{};
+  const comboSol90=(tCombo.powerTimeline||[]).find((x)=>x.sol===90)||{};
+  assert('Excavator duty-cycle draw schedule is applied',Math.abs((comboSol0.drawKW||0)-13.5)<0.01 && Math.abs((comboSol30.drawKW||0)-12.5)<0.01 && Math.abs((comboSol60.drawKW||0)-9.5)<0.01 && Math.abs((comboSol90.drawKW||0)-9.5)<0.01,`sol0=${comboSol0.drawKW} sol30=${comboSol30.drawKW} sol60=${comboSol60.drawKW} sol90=${comboSol90.drawKW}`);
+  const printerCombo=simulate([1,7,8,9],'partial',13);
+  const printerSol0=(printerCombo.powerTimeline||[]).find((x)=>x.sol===0)||{};
+  const printerSol30=(printerCombo.powerTimeline||[]).find((x)=>x.sol===30)||{};
+  const printerSol60=(printerCombo.powerTimeline||[]).find((x)=>x.sol===60)||{};
+  const printerSol90=(printerCombo.powerTimeline||[]).find((x)=>x.sol===90)||{};
+  assert('Printer duty-cycle draw schedule is applied',Math.abs((printerSol0.drawKW||0)-10.0)<0.01 && Math.abs((printerSol30.drawKW||0)-14.0)<0.01 && Math.abs((printerSol60.drawKW||0)-12.0)<0.01 && Math.abs((printerSol90.drawKW||0)-10.0)<0.01,`sol0=${printerSol0.drawKW} sol30=${printerSol30.drawKW} sol60=${printerSol60.drawKW} sol90=${printerSol90.drawKW}`);
+  assert('Habitation requested partial with printer remains partial',printerCombo.habitationRequested==='partial' && printerCombo.habitationUsed==='partial',`requested=${printerCombo.habitationRequested} used=${printerCombo.habitationUsed}`);
   const comboSol180=(tCombo.powerTimeline||[]).find((x)=>x.sol===180)||{};
   assert('Power summary source-of-truth matches Sol 180 timeline',tCombo.pOut===comboSol180.genKW && tCombo.pDraw===comboSol180.drawKW && tCombo.deficit===comboSol180.deficit,`pOut=${tCombo.pOut} tlOut=${comboSol180.genKW} pDraw=${tCombo.pDraw} tlDraw=${comboSol180.drawKW}`);
   const bcDisplay=getDisplayIndexScore(tCombo,'BC');
