@@ -979,7 +979,19 @@ let presenceHeartbeatId = null;
 let activeSection = 'site';
 const PRESENCE_STALE_MS = 45000;
 const PRESENCE_HEARTBEAT_MS = 15000;
-const clientId = `client-${Math.random().toString(36).slice(2,10)}-${Date.now().toString(36)}`;
+const MAX_TEAM_MEMBERS = 4;
+const clientId = (()=>{
+  const fallback=`client-${Math.random().toString(36).slice(2,10)}-${Date.now().toString(36)}`;
+  try{
+    const key='ares_client_id';
+    const existing=sessionStorage.getItem(key);
+    if(existing) return existing;
+    sessionStorage.setItem(key,fallback);
+    return fallback;
+  }catch(_err){
+    return fallback;
+  }
+})();
 
 // ═══════════════════════════
 // CHARTS
@@ -1287,6 +1299,33 @@ function getPresencePayload(){
   };
 }
 
+function isActiveStudentPresence(entry,now){
+  if(!entry||typeof entry!=='object') return false;
+  const role=String(entry.role||'').toLowerCase();
+  if(role!=='student') return false;
+  const lastSeen=Number(entry.lastSeen)||0;
+  return now-lastSeen<=PRESENCE_STALE_MS;
+}
+
+async function getOnlineStudentCountForTeam(teamId){
+  if(!firebaseReady||!db||!teamId) return 0;
+  try{
+    const snap=await db.ref(`sessions/${sessionId}/presence`).once('value');
+    const raw=snap.val()||{};
+    const now=Date.now();
+    let count=0;
+    Object.entries(raw).forEach(([pid,entry])=>{
+      if(pid===clientId) return;
+      if(!isActiveStudentPresence(entry,now)) return;
+      const entryTeam=String(entry.teamId||'').trim().toUpperCase();
+      if(entryTeam===teamId) count+=1;
+    });
+    return count;
+  }catch(_err){
+    return 0;
+  }
+}
+
 async function pushPresenceUpdate(){
   if(!firebaseReady||!db||!presenceRef||!accessState.role) return;
   try{
@@ -1322,18 +1361,14 @@ function getLiveTeamStatusMap(rawPresence){
   const now=Date.now();
   const map={};
   Object.values(rawPresence||{}).forEach((entry)=>{
-    if(!entry||typeof entry!=='object') return;
-    const lastSeen=Number(entry.lastSeen)||0;
-    if(now-lastSeen>PRESENCE_STALE_MS) return;
-    const role=String(entry.role||'').toLowerCase();
-    if(role!=='student') return;
+    if(!isActiveStudentPresence(entry,now)) return;
     const teamId=String(entry.teamId||'').trim().toUpperCase();
     if(!teamId) return;
     const section=String(entry.section||'site').toLowerCase();
     if(!map[teamId]) map[teamId]={online:0,proposal:0,active:0};
-    map[teamId].online += 1;
-    if(section==='proposal') map[teamId].proposal += 1;
-    if(['equipment','proposal','feedback','language','presentation'].includes(section)) map[teamId].active += 1;
+    map[teamId].online = Math.min(MAX_TEAM_MEMBERS,map[teamId].online + 1);
+    if(section==='proposal') map[teamId].proposal = Math.min(MAX_TEAM_MEMBERS,map[teamId].proposal + 1);
+    if(['equipment','proposal','feedback','language','presentation'].includes(section)) map[teamId].active = Math.min(MAX_TEAM_MEMBERS,map[teamId].active + 1);
   });
   return map;
 }
@@ -1443,6 +1478,11 @@ async function unlockStudentAccess(){
     }
     const teamId=cfg.teamId;
     const teamBudget=parseMu(cfg.budget,12);
+    const onlineCount=await getOnlineStudentCountForTeam(teamId);
+    if(onlineCount>=MAX_TEAM_MEMBERS){
+      showAccessMessage('student-access-msg',`Team ${teamId} is full (${MAX_TEAM_MEMBERS}/${MAX_TEAM_MEMBERS} online). Ask one member to close their session.`,true);
+      return;
+    }
 
     setStudentUnlockBusyState(true);
     showAccessMessage('student-access-msg','PIN verified — establishing secure link...',false);
@@ -1804,8 +1844,9 @@ function renderClassOverview(){
     const safeTeam=teamId.replace(/[^A-Za-z0-9_-]/g,'-');
     const hasSubmission=Boolean(r);
     const roundLabel=latest ? (ROUND_LABELS[latest.round-1]||'—') : '—';
+    const onlineLabel=`${Math.min(live.online,MAX_TEAM_MEMBERS)}/${MAX_TEAM_MEMBERS} ONLINE`;
     return `<tr>
-      <td><div>${esc(teamId)}</div><div class="team-live"><span class="live-chip ${liveClass}">${liveText}</span><span class="online-pill">${live.online} ONLINE</span></div></td>
+      <td><div>${esc(teamId)}</div><div class="team-live"><span class="live-chip ${liveClass}">${liveText}</span><span class="online-pill">${onlineLabel}</span></div></td>
       <td>${roundLabel}</td>
       <td class="${hasSubmission?`mv-cell ${r.mv>=3?'good':'bad'}`:''}">${hasSubmission?r.mv.toFixed(2):'—'}</td>
       ${Object.keys(THRESH).map((k)=>{
