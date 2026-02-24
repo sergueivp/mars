@@ -254,6 +254,17 @@ body.app-locked .main{visibility:hidden}
 .pwr-box{background:var(--bg-card);border:1px solid var(--border);padding:10px 12px;text-align:center}
 .pwr-lbl{font-family:var(--font-disp);font-size:8px;font-weight:700;letter-spacing:0.15em;color:var(--text-3);text-transform:uppercase;margin-bottom:5px}
 .pwr-val{font-family:var(--font-mono);font-size:20px;line-height:1}
+.playback-wrap{margin-top:12px;border:1px solid var(--border);background:var(--bg-card);padding:12px}
+.playback-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:8px}
+.playback-title{font-family:var(--font-disp);font-size:9px;letter-spacing:.14em;text-transform:uppercase;color:var(--text-2)}
+.playback-btn{background:transparent;border:1px solid var(--border);padding:5px 10px;font-family:var(--font-mono);font-size:8px;letter-spacing:.1em;cursor:pointer;color:var(--text-2)}
+.playback-btn:hover{border-color:var(--crimson);color:var(--crimson)}
+.playback-phase{font-family:var(--font-mono);font-size:10px;color:var(--crimson);margin-bottom:8px}
+.playback-progress{height:5px;background:var(--border);position:relative;overflow:hidden;margin-bottom:8px}
+.playback-progress-bar{position:absolute;left:0;top:0;bottom:0;width:0;background:var(--crimson);transition:width .25s ease}
+.playback-log{display:grid;gap:5px}
+.playback-line{font-family:var(--font-body);font-size:12px;color:var(--text-2)}
+.playback-event{font-family:var(--font-mono);font-size:9px;color:var(--text-3)}
 
 /* ── LANGUAGE ── */
 .frame-cat{margin-bottom:18px}
@@ -1138,8 +1149,109 @@ function getSelectedMu(ids){
 
 function getTransportStatus(tf){
   if(tf<40) return 'FAILED';
-  if(tf<70) return 'AT RISK';
+  if(tf<70) return 'AT_RISK';
   return 'OK';
+}
+
+function getHabMultiplier(hab){
+  if(hab==='partial') return 0.65;
+  if(hab==='subsurface') return 0.35;
+  return 1.0;
+}
+
+function buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk){
+  const has=id=>ids.includes(id);
+  const sorted=[...(powerTimeline||[])].sort((a,b)=>(a.sol??a.day)-(b.sol??b.day));
+  const radiationTimeline=[];
+  const lsTimeline=[];
+  const erTimeline=[];
+  const csTimeline=[];
+  const keyEvents=[];
+
+  let ps=transportAtRisk?92:100;
+  let ls=80 + (has(8)?12:-18) + (has(9)?10:-22) + (has(19)?6:0) + (has(20)?5:0) + (transportAtRisk?-6:0);
+  let er=68 + (has(13)?16:0) + (has(15)?10:0) + (has(14)?(has(13)?8:3):0);
+  let cs=70 + (has(16)?8:0) + (has(17)?6:0);
+  let cumDose=0;
+  let prevSol=0;
+
+  if(printerCompletedAt!==null) keyEvents.push({sol:printerCompletedAt,type:'shielding',outcome:'success',reason:'Shielding completed.'});
+  if(excavatorReady) keyEvents.push({sol:60,type:'subsurface',outcome:'success',reason:'Subsurface access achieved.'});
+
+  sorted.forEach((step)=>{
+    const sol=step.sol??step.day??0;
+    const gen=step.genKW??step.pOut??0;
+    const draw=step.drawKW??step.pDraw??0;
+    const net=step.netKW??step.net??Math.round((gen-draw)*100)/100;
+    const deficit=Math.max(0,Math.round((draw-gen)*100)/100);
+
+    ps = clamp(ps - (deficit*9) - ((has(2)&&!has(3)&&sol>=60)?4:0),0,100);
+    const habMult=getHabMultiplier(hab);
+    let shieldMult=1.0;
+    if(printerCompletedAt!==null && sol>=printerCompletedAt) shieldMult*=0.65;
+    if(excavatorReady && hab!=='surface' && sol>=60) shieldMult*=0.85;
+    const block=Math.max(0,sol-prevSol);
+    cumDose += block * 1.05 * habMult * shieldMult;
+    const rs=clamp(100 - Math.max(0,cumDose-60)*0.7,0,100);
+
+    let lsLoss=0;
+    if(!has(8)) lsLoss += has(19)?(sol>=90?4:3):7;
+    if(!has(9)) lsLoss += (sol>=30?6:4);
+    if(has(9)&&!has(15)&&sol>=120) lsLoss += 5;
+    if(ps<50) lsLoss += 3;
+    if(ps<35) lsLoss += 5;
+    if(transportAtRisk && (has(19)||has(20)) && sol>=30) lsLoss += 2;
+    ls = clamp(ls-lsLoss,0,100);
+
+    let erLoss=has(13)?1.5:4;
+    if(!has(15)&&has(9)&&sol>=120) erLoss+=3;
+    if(deficit>0) erLoss += deficit*1.5;
+    if(has(2)&&!has(3)&&sol>=60) erLoss += 2;
+    er = clamp(er-erLoss,0,100);
+
+    cs = clamp((ls*0.45)+(ps*0.2)+(er*0.2)+(rs*0.15)+(has(16)?3:-2)+(has(17)?2:-2),0,100);
+
+    step.PS=Math.round(ps*100)/100;
+    step.sol=sol;
+    step.genKW=gen;
+    step.drawKW=draw;
+    step.netKW=Math.round(net*100)/100;
+
+    radiationTimeline.push({sol,cumDose:Math.round(cumDose*100)/100,RS:Math.round(rs*100)/100});
+    lsTimeline.push({sol,LS:Math.round(ls*100)/100});
+    erTimeline.push({sol,ER:Math.round(er*100)/100});
+    csTimeline.push({sol,CS:Math.round(cs*100)/100});
+
+    if(ps<50) keyEvents.push({sol,type:'power',outcome:'warn',reason:'Power is unstable.'});
+    if(ps<35) keyEvents.push({sol,type:'power',outcome:'fail',reason:'Critical power shortage.'});
+    if(rs<55) keyEvents.push({sol,type:'radiation',outcome:'warn',reason:'Radiation risk rising.'});
+    if(ls<55) keyEvents.push({sol,type:'life_support',outcome:'warn',reason:'Life support under stress.'});
+    if(er<40) keyEvents.push({sol,type:'reliability',outcome:'warn',reason:'Breakdown risk increasing.'});
+
+    prevSol=sol;
+  });
+
+  return {powerTimeline:sorted,radiationTimeline,lsTimeline,erTimeline,csTimeline,keyEvents};
+}
+
+function buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,reason){
+  return {
+    invalid:true,
+    invalidReason:reason,
+    sc:{RS:1.0,ES:1.0,EP:1.0,BC:1.0,CS:1.0},
+    mv:1.0,viability100:0,resultLabel:'NON-VIABLE',status:'NON-VIABLE',
+    failDay:null,failIdx:null,failReason:null,
+    pOut:0,pDraw:0,deficit:0,powerAt180:{day:180,pOut:0,pDraw:0,deficit:0,net:0},powerTimeline:[],
+    printerCompletedAt:null,excavatorReady:false,habitation:hab,
+    hasSolar:ids.includes(2),hasDust:ids.includes(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:ids.includes(8),hasRepair:ids.includes(13),hasReactor:ids.includes(1),
+    weakestAreas:['Power stability','Water/oxygen systems'],
+    diagnostics:['Fix submission requirements and try again.','Check dependencies and habitation requirements.'],
+    tf:100,transportStatus:'OK',muTotal,muBudget,muOver,
+    oxygenDurationText:ids.includes(9)?'continuous':'until Sol 45',
+    waterDurationText:ids.includes(8)?'continuous':(ids.includes(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
+    studentWarnings:[],
+    radiationTimeline:[],lsTimeline:[],erTimeline:[],csTimeline:[],keyEvents:[],
+  };
 }
 
 function simulate(ids,habitation,budget,opts){
@@ -1149,32 +1261,38 @@ function simulate(ids,habitation,budget,opts){
   const muBudget=Math.max(0.01,parseMu(budget,12));
   const muTotal=getSelectedMu(ids);
   const muOver=muTotal/muBudget;
-  if(muOver>MAX_OVERWEIGHT_RATIO && forcedTf===null){
-    return {
-      invalid:true,invalidReason:'Overweight exceeds 15% limit',
-      sc:{RS:0.8,ES:0.8,EP:0.8,BC:0.8,CS:0.8},
-      mv:0.8,viability100:16,resultLabel:'NON-VIABLE',
-      failDay:0,failIdx:'ES',failReason:'Overweight exceeds 15% limit',
-      pOut:0,pDraw:0,deficit:0,powerAt180:{day:180,pOut:0,pDraw:0,deficit:0,net:0},powerTimeline:[],
-      printerCompletedAt:null,excavatorReady:false,habitation:hab,
-      hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
-      weakestAreas:['Power stability','Water/oxygen systems'],
-      diagnostics:['Reduce cargo mass to stay within launch limits.','Keep mission mass closer to budget before resubmission.'],
-      tf:0,transportStatus:'FAILED',muTotal,muBudget,muOver,
-      oxygenDurationText:'unknown',waterDurationText:'unknown',
-      studentWarnings:['Submission invalid: overweight exceeds the allowed 15% band.'],
-    };
+  const uniqueCount=new Set(ids).size;
+
+  if(uniqueCount!==4){
+    return buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,'Select exactly 4 equipment items');
+  }
+  if(!habitation){
+    return buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,'Select a habitation strategy');
+  }
+  if(has(10)&&!has(8)){
+    return buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,'Hydroponics requires water recycler');
+  }
+  if(hab==='partial' && !(has(4)||has(7))){
+    return buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,'Partial subsurface requires excavator or shielding printer');
+  }
+  if(hab==='subsurface' && !(has(4)||has(5))){
+    return buildInvalidSubmission(ids,hab,muBudget,muTotal,muOver,'Fully subsurface requires excavator or reconnaissance rover');
   }
 
   const overweightPct=Math.max(0,(muOver-1)*100);
   const tfPenalty=muOver>1?4*overweightPct:0;
-  const tf=Math.round(forcedTf===null?clamp(100-tfPenalty,0,100):forcedTf);
+  const baseTf=muOver>MAX_OVERWEIGHT_RATIO ? 0 : clamp(100-tfPenalty,0,100);
+  const tf=Math.round(forcedTf===null?baseTf:forcedTf);
   const transportStatus=getTransportStatus(tf);
 
   if(transportStatus==='FAILED'){
+    const keyEvents=[
+      {sol:0,type:'launch',outcome:'success'},
+      {sol:0,type:'landing',outcome:'fail',reason:'Transport failure: spacecraft too heavy to reach Mars / land safely'},
+    ];
     return {
       sc:{RS:1.0,ES:0.8,EP:1.0,BC:1.0,CS:0.9},
-      mv:1.0,viability100:20,resultLabel:'NON-VIABLE',
+      mv:1.0,viability100:20,resultLabel:'NON-VIABLE',status:'NON-VIABLE',
       failDay:0,failIdx:'ES',failReason:'Transport failure: spacecraft too heavy to reach Mars / land safely',
       pOut:0,pDraw:0,deficit:0,powerAt180:{day:180,pOut:0,pDraw:0,deficit:0,net:0},powerTimeline:[],
       printerCompletedAt:null,excavatorReady:false,habitation:hab,
@@ -1184,12 +1302,13 @@ function simulate(ids,habitation,budget,opts){
       tf,transportStatus,muTotal,muBudget,muOver,
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
       waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
-      studentWarnings:['Transport check failed before mission start.'],
+      studentWarnings:['Your spacecraft lifted off, but used too much fuel. It could not enter Mars orbit safely.'],
+      radiationTimeline:[],lsTimeline:[],erTimeline:[],csTimeline:[],keyEvents,
     };
   }
 
   const hasPrimaryPower=has(1)||has(2);
-  const transportAtRisk=transportStatus==='AT RISK';
+  const transportAtRisk=transportStatus==='AT_RISK';
 
   let printerCompletedAt=null;
   let excavatorReady=false;
@@ -1199,7 +1318,8 @@ function simulate(ids,habitation,budget,opts){
     const pOut=getCheckpointGeneration(ids,day);
     const pDraw=getCheckpointDraw(ids,day);
     const deficit=Math.max(0,Math.round((pDraw-pOut)*100)/100);
-    powerTimeline.push({day,pOut,pDraw,deficit,net:Math.round((pOut-pDraw)*100)/100});
+    const net=Math.round((pOut-pDraw)*100)/100;
+    powerTimeline.push({sol:day,day,pOut,pDraw,genKW:pOut,drawKW:pDraw,deficit,net,netKW:net,PS:100});
     if(has(7)&&printerCompletedAt===null){
       if(day===30 && deficit<=1.0) printerCompletedAt=30;
       if(day===60 && deficit<=1.0) printerCompletedAt=60;
@@ -1212,11 +1332,13 @@ function simulate(ids,habitation,budget,opts){
     const sc={RS:1.0,ES:0.5,EP:1.0,BC:1.0,CS:0.8};
     const weakest=['Power stability','Water/oxygen systems'];
     const diagnostics=buildDiagnostics(weakest);
+    const timelinePack=buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
+    const keyEvents=[{sol:0,type:'launch',outcome:'success'},{sol:0,type:'landing',outcome:'success'},...timelinePack.keyEvents];
     return {
-      sc,mv:1.0,viability100:20,resultLabel:'NON-VIABLE',
+      sc,mv:1.0,viability100:20,resultLabel:'NON-VIABLE',status:'NON-VIABLE',
       failDay:10,failIdx:'ES',failReason:'No primary power source (cannot run life support)',
       pOut:sol180.pOut,pDraw:sol180.pDraw,deficit:sol180.deficit,
-      powerAt180:sol180,powerTimeline,
+      powerAt180:sol180,powerTimeline:timelinePack.powerTimeline,
       printerCompletedAt:null,excavatorReady:false,habitation:hab,
       hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:false,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
       weakestAreas:weakest,diagnostics,
@@ -1224,6 +1346,11 @@ function simulate(ids,habitation,budget,opts){
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
       waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
+      radiationTimeline:timelinePack.radiationTimeline,
+      lsTimeline:timelinePack.lsTimeline,
+      erTimeline:timelinePack.erTimeline,
+      csTimeline:timelinePack.csTimeline,
+      keyEvents,
     };
   }
 
@@ -1232,11 +1359,13 @@ function simulate(ids,habitation,budget,opts){
     const sc={RS:1.2,ES:1.8,EP:1.2,BC:1.5,CS:1.2};
     const weakest=['Radiation protection','Water/oxygen systems'];
     const diagnostics=buildDiagnostics(weakest);
+    const timelinePack=buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
+    const keyEvents=[{sol:0,type:'launch',outcome:'success'},{sol:0,type:'landing',outcome:'success'},...timelinePack.keyEvents];
     return {
-      sc,mv:1.5,viability100:30,resultLabel:'NON-VIABLE',
+      sc,mv:1.5,viability100:30,resultLabel:'NON-VIABLE',status:'NON-VIABLE',
       failDay:0,failIdx:'RS',failReason:'Partial subsurface requires excavator or shielding printer',
       pOut:sol180.pOut,pDraw:sol180.pDraw,deficit:sol180.deficit,
-      powerAt180:sol180,powerTimeline,
+      powerAt180:sol180,powerTimeline:timelinePack.powerTimeline,
       printerCompletedAt,excavatorReady,habitation:hab,
       hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
       weakestAreas:weakest,diagnostics,
@@ -1244,6 +1373,11 @@ function simulate(ids,habitation,budget,opts){
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
       waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
+      radiationTimeline:timelinePack.radiationTimeline,
+      lsTimeline:timelinePack.lsTimeline,
+      erTimeline:timelinePack.erTimeline,
+      csTimeline:timelinePack.csTimeline,
+      keyEvents,
     };
   }
   if(hab==='subsurface' && !(has(4)||has(5))){
@@ -1251,11 +1385,13 @@ function simulate(ids,habitation,budget,opts){
     const sc={RS:1.2,ES:1.8,EP:1.2,BC:1.5,CS:1.2};
     const weakest=['Radiation protection','Water/oxygen systems'];
     const diagnostics=buildDiagnostics(weakest);
+    const timelinePack=buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
+    const keyEvents=[{sol:0,type:'launch',outcome:'success'},{sol:0,type:'landing',outcome:'success'},...timelinePack.keyEvents];
     return {
-      sc,mv:1.5,viability100:30,resultLabel:'NON-VIABLE',
+      sc,mv:1.5,viability100:30,resultLabel:'NON-VIABLE',status:'NON-VIABLE',
       failDay:0,failIdx:'RS',failReason:'Fully subsurface requires excavator or reconnaissance rover',
       pOut:sol180.pOut,pDraw:sol180.pDraw,deficit:sol180.deficit,
-      powerAt180:sol180,powerTimeline,
+      powerAt180:sol180,powerTimeline:timelinePack.powerTimeline,
       printerCompletedAt,excavatorReady,habitation:hab,
       hasSolar:has(2),hasDust:has(3),hasSub:false,hasHab:hab==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
       weakestAreas:weakest,diagnostics,
@@ -1263,6 +1399,11 @@ function simulate(ids,habitation,budget,opts){
       oxygenDurationText:has(9)?'continuous':'until Sol 45',
       waterDurationText:has(8)?'continuous':(has(19)?(hab==='surface'?'until Sol 105':'until Sol 120'):'until Sol 90'),
       studentWarnings:transportAtRisk?['Overweight cargo reduced fuel/supplies; you start with fewer reserves.']:[],
+      radiationTimeline:timelinePack.radiationTimeline,
+      lsTimeline:timelinePack.lsTimeline,
+      erTimeline:timelinePack.erTimeline,
+      csTimeline:timelinePack.csTimeline,
+      keyEvents,
     };
   }
 
@@ -1349,17 +1490,24 @@ function simulate(ids,habitation,budget,opts){
   if(!has(9)) studentWarnings.push('Oxygen supply is limited. Crew runs out around Sol 45.');
   if(!has(8)&&has(19)) studentWarnings.push(`Water supply runs out around ${waterDurationText.replace('until ','')} unless you recycle it.`);
   if(has(9)&&!has(15)) studentWarnings.push('Oxygen system becomes unstable late mission without spare seals/filters.');
+  const timelinePack=buildMissionTimelines(ids,hab,powerTimeline,printerCompletedAt,excavatorReady,transportAtRisk);
+  const keyEvents=[{sol:0,type:'launch',outcome:'success'},{sol:0,type:'landing',outcome:'success'},...timelinePack.keyEvents];
 
   return {
-    sc,mv,viability100,resultLabel:classifyViability(viability100,failDay),
+    sc,mv,viability100,resultLabel:classifyViability(viability100,failDay),status:classifyViability(viability100,failDay),
     failDay,failIdx,failReason,
     pOut:sol180.pOut,pDraw:sol180.pDraw,deficit:sol180.deficit,
-    powerAt180:sol180,powerTimeline,
+    powerAt180:sol180,powerTimeline:timelinePack.powerTimeline,
     printerCompletedAt,excavatorReady,habitation:hab,
     hasSolar:has(2),hasDust:has(3),hasSub:excavatorReady&&hab!=='surface',hasHab:hab==='surface',hasShield:printerCompletedAt!==null,hasWater:has(8),hasRepair:has(13),hasReactor:has(1),
     weakestAreas:weaknessRank,diagnostics,
     tf,transportStatus,muTotal,muBudget,muOver,
     oxygenDurationText,waterDurationText,studentWarnings,
+    radiationTimeline:timelinePack.radiationTimeline,
+    lsTimeline:timelinePack.lsTimeline,
+    erTimeline:timelinePack.erTimeline,
+    csTimeline:timelinePack.csTimeline,
+    keyEvents,
   };
 }
 
@@ -1380,13 +1528,34 @@ function runDeterministicFixtures(){
   assert('Kilopower + water + CO2 + printer -> no early radiation fail',t4.printerCompletedAt===30 && t4.failDay!==27,`printerAt=${t4.printerCompletedAt} failDay=${t4.failDay}`);
 
   const t5=simulate([1,8,9,15],'surface',10);
-  assert('MU_over 1.10 -> accepted with computed TF',!t5.invalid && t5.transportStatus==='AT RISK' && t5.tf===60,`invalid=${!!t5.invalid} status=${t5.transportStatus} tf=${t5.tf}`);
+  assert('MU_over 1.10 -> accepted with computed TF',t5.transportStatus==='AT_RISK' && t5.tf===60,`status=${t5.transportStatus} tf=${t5.tf}`);
 
   const t6=simulate([1,8,9,19],'surface',10);
-  assert('MU_over 1.20 -> invalid overweight >15%',!!t6.invalid && /Overweight exceeds 15%/i.test(t6.invalidReason||''),`invalid=${!!t6.invalid} reason=${t6.invalidReason||''}`);
+  assert('MU_over 1.20 -> non-viable transport FAILED at Sol 0',t6.transportStatus==='FAILED' && t6.failDay===0 && /Transport failure/i.test(t6.failReason||''),`status=${t6.transportStatus} failDay=${t6.failDay} reason=${t6.failReason||''}`);
 
   const t7=simulate([1,8,9,15],'surface',10,{forceTf:35});
   assert('TF < 40 -> immediate failure day 0 (transport failure)',t7.transportStatus==='FAILED' && t7.failDay===0 && /Transport failure/i.test(t7.failReason||''),`status=${t7.transportStatus} failDay=${t7.failDay} reason=${t7.failReason||''}`);
+
+  const uiGate=getSubmissionGateState([1,8,9,19],'surface',10,0);
+  assert('UI gate: overweight does not disable submit',uiGate.ready===true && uiGate.overHard===true,`ready=${uiGate.ready} overHard=${uiGate.overHard}`);
+
+  const t10=simulate([1,9,10,13],'surface',12);
+  assert('Hard dependency fail stays INVALID',!!t10.invalid && /Hydroponics requires water recycler/i.test(t10.invalidReason||''),`invalid=${!!t10.invalid} reason=${t10.invalidReason||''}`);
+
+  const t11=simulate([1,8,9],'surface',12);
+  assert('Not exactly 4 items stays INVALID',!!t11.invalid && /exactly 4/i.test(t11.invalidReason||''),`invalid=${!!t11.invalid} reason=${t11.invalidReason||''}`);
+
+  const p1=buildPlaybackPlan(t7);
+  assert('Playback: transport failed stops after landing',p1.steps.length===2 && p1.steps[1].kind==='landing' && p1.completed===false,`steps=${p1.steps.map((s)=>s.kind).join(',')} completed=${p1.completed}`);
+
+  const t8=simulate([1,7,9,13],'surface',12);
+  const p2=buildPlaybackPlan(t8);
+  assert('Playback: mission fail at sol 90 stops at 90',t8.failDay===90 && p2.stopSol===90,`failDay=${t8.failDay} stopSol=${p2.stopSol}`);
+
+  const t9=simulate([1,7,8,9],'surface',12);
+  const p3=buildPlaybackPlan(t9);
+  const lastStep=p3.steps[p3.steps.length-1];
+  assert('Playback: viable mission runs to sol 180',t9.failDay===null && p3.completed===true && lastStep.kind==='checkpoint' && lastStep.sol===180,`failDay=${t9.failDay} completed=${p3.completed} last=${lastStep.kind}:${lastStep.sol}`);
 
   return {
     ok:checks.every((c)=>c.pass),
@@ -1468,7 +1637,9 @@ function renderFeedbackForTeam(teamId){
   entries.slice().reverse().forEach((sub)=>{
     const reportId=++feedbackSeq;
     c.innerHTML += buildFeedback(sub.result,sub.round,sub.teamId||teamId,sub.habitation,reportId);
+    missionPlaybackResults[reportId]=sub.result;
     renderTrajectoryChart(`traj-${reportId}`,sub.result);
+    startMissionPlayback(reportId,sub.result);
   });
 }
 
@@ -1819,7 +1990,8 @@ function buildFeedback(r,round,team,hab,reportId){
   const stTxt=r.resultLabel||'NON-VIABLE';
   const stCls=stTxt==='VIABLE'?'pass':stTxt==='MARGINAL'?'warn':'fail';
   const transport=r.transportStatus||'OK';
-  const transportColor=transport==='OK'?'var(--green)':transport==='AT RISK'?'var(--orange)':'var(--red)';
+  const transportColor=transport==='OK'?'var(--green)':transport==='AT_RISK'?'var(--orange)':'var(--red)';
+  const transportText=transport.replace('_',' ');
   const idxRows=Object.keys(THRESH).map(k=>{
     const sc=r.sc[k],th=THRESH[k];
     const pct=Math.min((sc/5)*100,100);
@@ -1844,6 +2016,15 @@ function buildFeedback(r,round,team,hab,reportId){
   const failMarker = r.failDay!==null
     ? `<div style="font-family:var(--font-mono);font-size:9px;color:var(--red);margin-top:6px">DAY ${r.failDay} — ${(IDX_NAMES[r.failIdx]||'SYSTEM')} CRITICAL</div>`
     : '';
+  const playbackBlock=`<div class="playback-wrap" id="playback-${reportId}">
+      <div class="playback-head">
+        <div class="playback-title">Mission Playback</div>
+        <button class="playback-btn" id="playback-replay-${reportId}" onclick="replayMissionPlayback(${reportId})">Replay</button>
+      </div>
+      <div class="playback-phase" id="playback-phase-${reportId}">Preparing mission playback...</div>
+      <div class="playback-progress"><div class="playback-progress-bar" id="playback-progress-${reportId}"></div></div>
+      <div class="playback-log" id="playback-log-${reportId}"></div>
+    </div>`;
   if(transport==='FAILED'){
     return `<div class="fb-report" id="fb-report-${reportId}" data-team="${esc(team)}">
       <div class="fb-hdr">
@@ -1852,11 +2033,13 @@ function buildFeedback(r,round,team,hab,reportId){
         <div class="fb-status fail">NON-VIABLE</div>
       </div>
       <div class="g3 gap12 mb12" style="grid-template-columns:repeat(3,1fr)">
-        <div class="pwr-box"><div class="pwr-lbl">TRANSPORT CHECK</div><div class="pwr-val" style="font-size:18px;color:${transportColor}">${transport}</div></div>
+        <div class="pwr-box"><div class="pwr-lbl">TRANSPORT CHECK</div><div class="pwr-val" style="font-size:18px;color:${transportColor}">${transportText}</div></div>
         <div class="pwr-box"><div class="pwr-lbl">EST. OXYGEN DURATION</div><div class="pwr-val" style="font-size:16px">${oxygenText}</div></div>
         <div class="pwr-box"><div class="pwr-lbl">EST. WATER DURATION</div><div class="pwr-val" style="font-size:16px">${waterText}</div></div>
       </div>
+      <div class="fb-line crit">Simulation stopped at Sol 0.</div>
       ${warningRows?`<div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:6px">MISSION NOTES</div>${warningRows}`:''}
+      ${playbackBlock}
       ${failBlock}
     </div>`;
   }
@@ -1872,11 +2055,12 @@ function buildFeedback(r,round,team,hab,reportId){
       <div class="fb-status ${stCls}">${stTxt}</div>
     </div>
     <div class="g3 gap12 mb12" style="grid-template-columns:repeat(3,1fr)">
-      <div class="pwr-box"><div class="pwr-lbl">TRANSPORT CHECK</div><div class="pwr-val" style="font-size:18px;color:${transportColor}">${transport}</div></div>
+      <div class="pwr-box"><div class="pwr-lbl">TRANSPORT CHECK</div><div class="pwr-val" style="font-size:18px;color:${transportColor}">${transportText}</div></div>
       <div class="pwr-box"><div class="pwr-lbl">EST. OXYGEN DURATION</div><div class="pwr-val" style="font-size:16px">${oxygenText}</div></div>
       <div class="pwr-box"><div class="pwr-lbl">EST. WATER DURATION</div><div class="pwr-val" style="font-size:16px">${waterText}</div></div>
     </div>
     ${warningRows?`<div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:6px">MISSION NOTES</div>${warningRows}`:''}
+    ${playbackBlock}
     <div style="font-family:var(--font-mono);font-size:8px;color:var(--text-3);letter-spacing:0.2em;text-transform:uppercase;margin-bottom:8px">POWER SUMMARY (SOL 180)</div>
     <div class="g3 gap12 mb12" style="grid-template-columns:repeat(3,1fr)">
       <div class="pwr-box"><div class="pwr-lbl">POWER PRODUCED</div><div class="pwr-val" style="color:var(--green)">${r.pOut} kW</div></div>
@@ -1934,6 +2118,118 @@ function computeTrajectorySeries(result){
     series.CS.push(Math.round(cs*100)/100);
   });
   return series;
+}
+
+let missionPlaybackControllers = {};
+let missionPlaybackResults = {};
+
+function getTimelineValue(timeline,sol,key,fallback){
+  if(!Array.isArray(timeline)||timeline.length===0) return fallback;
+  const exact=timeline.find((x)=>Number(x.sol)===Number(sol));
+  if(exact && Number.isFinite(exact[key])) return exact[key];
+  const prior=[...timeline].filter((x)=>Number(x.sol)<=Number(sol)).sort((a,b)=>b.sol-a.sol)[0];
+  if(prior && Number.isFinite(prior[key])) return prior[key];
+  const first=timeline[0];
+  return Number.isFinite(first?.[key])?first[key]:fallback;
+}
+
+function buildPlaybackPlan(result){
+  const steps=[{kind:'launch',sol:0},{kind:'landing',sol:0}];
+  if((result.transportStatus||'OK')==='FAILED'){
+    return {steps,stopSol:0,stopReason:result.failReason||'Transport failure',completed:false};
+  }
+  const checkpoints=[...(result.powerTimeline||[])].sort((a,b)=>a.sol-b.sol);
+  let failStep=null;
+  checkpoints.forEach((cp)=>{
+    if(failStep!==null) return;
+    steps.push({kind:'checkpoint',sol:cp.sol});
+    if(result.failDay!==null && cp.sol>=result.failDay) failStep=cp.sol;
+  });
+  if(result.failDay!==null && failStep===null){
+    const lastSol=checkpoints.length?checkpoints[checkpoints.length-1].sol:180;
+    steps.push({kind:'checkpoint',sol:lastSol});
+    failStep=lastSol;
+  }
+  return {
+    steps,
+    stopSol:failStep,
+    stopReason:result.failReason||'Mission failure',
+    completed:result.failDay===null,
+  };
+}
+
+function renderPlaybackFrame(reportId,step,result){
+  const phaseEl=document.getElementById(`playback-phase-${reportId}`);
+  const logEl=document.getElementById(`playback-log-${reportId}`);
+  const barEl=document.getElementById(`playback-progress-${reportId}`);
+  if(!phaseEl||!logEl||!barEl) return;
+
+  if(step.kind==='launch'){
+    phaseEl.textContent='Launch sequence (Sol 0)';
+    logEl.innerHTML=`<div class="playback-line">Launch: successful liftoff.</div>`;
+    barEl.style.width='2%';
+    return;
+  }
+  if(step.kind==='landing'){
+    const failed=(result.transportStatus||'OK')==='FAILED';
+    phaseEl.textContent='Transit and landing (Sol 0)';
+    logEl.innerHTML=failed
+      ? `<div class="playback-line">Landing: failed.</div><div class="playback-event">${esc(result.failReason||'Transport failure')}</div>`
+      : `<div class="playback-line">Landing: successful.</div>`;
+    barEl.style.width='4%';
+    return;
+  }
+
+  const sol=step.sol;
+  const p=(result.powerTimeline||[]).find((x)=>x.sol===sol)||{};
+  const rs=getTimelineValue(result.radiationTimeline,sol,'RS',0);
+  const ls=getTimelineValue(result.lsTimeline,sol,'LS',0);
+  const rsState=rs>=55?'OK':'RISK';
+  const lsState=ls>=55?'OK':'RISK';
+  const net=Number.isFinite(p.netKW)?p.netKW:0;
+  phaseEl.textContent=`Mission day: Sol ${sol}/180`;
+  logEl.innerHTML=`
+    <div class="playback-line">Power: produced ${Number(p.genKW||0).toFixed(1)} kW / needed ${Number(p.drawKW||0).toFixed(1)} kW (margin ${net>=0?'+':''}${net.toFixed(1)})</div>
+    <div class="playback-line">Radiation safety: ${rsState}</div>
+    <div class="playback-line">Life support: ${lsState}</div>
+  `;
+  const eventLines=(result.keyEvents||[]).filter((e)=>Number(e.sol)===Number(sol)).map((e)=>`<div class="playback-event">${esc(e.reason||'Event')}</div>`).join('');
+  if(eventLines) logEl.innerHTML+=eventLines;
+  barEl.style.width=`${Math.max(4,Math.min(100,(sol/180)*100))}%`;
+}
+
+async function startMissionPlayback(reportId,result){
+  if(!result) return;
+  const token=Date.now()+Math.random();
+  missionPlaybackControllers[reportId]=token;
+  const phaseEl=document.getElementById(`playback-phase-${reportId}`);
+  const plan=buildPlaybackPlan(result);
+  const delay=(ms)=>new Promise((resolve)=>setTimeout(resolve,ms));
+
+  for(const step of plan.steps){
+    if(missionPlaybackControllers[reportId]!==token) return;
+    renderPlaybackFrame(reportId,step,result);
+    if(step.kind==='launch') await delay(800);
+    else if(step.kind==='landing') await delay(800);
+    else await delay(600);
+    if(step.kind==='landing' && (result.transportStatus||'OK')==='FAILED'){
+      if(phaseEl) phaseEl.textContent=`SIMULATION FAILED at Sol 0: ${result.failReason||'Transport failure'}`;
+      return;
+    }
+    if(step.kind==='checkpoint' && result.failDay!==null && step.sol>=result.failDay){
+      if(phaseEl) phaseEl.textContent=`SIMULATION FAILED at Sol ${result.failDay}: ${result.failReason||'Mission failure'}`;
+      return;
+    }
+  }
+  if(phaseEl){
+    phaseEl.textContent=plan.completed?'Mission playback complete: reached Sol 180.':`Playback stopped: ${plan.stopReason}`;
+  }
+}
+
+function replayMissionPlayback(reportId){
+  const result=missionPlaybackResults[reportId];
+  if(!result) return;
+  startMissionPlayback(reportId,result);
 }
 
 function renderTrajectoryChart(canvasId,result){
@@ -2035,12 +2331,27 @@ function renderSlots(){
   }).join('');
 }
 
-function renderBudget(){
-  const used=Math.round((S.selected.reduce((s,id)=>{const it=ITEMS.find(i=>i.id===id);return s+(it?it.mu:0);},0)+S.reconfig)*100)/100;
-  const overRatio=S.budget>0?(used/S.budget):99;
-  const pct=S.budget>0?Math.min(overRatio*100,115):100;
+function getSubmissionGateState(selected,habitation,budget,reconfig){
+  const used=Math.round((selected.reduce((s,id)=>{const it=ITEMS.find(i=>i.id===id);return s+(it?it.mu:0);},0)+(reconfig||0))*100)/100;
+  const overRatio=budget>0?(used/budget):99;
   const overSoft=overRatio>1 && overRatio<=1.15;
   const overHard=overRatio>1.15;
+  const has=(id)=>selected.includes(id);
+  const depFail=has(10)&&!has(8);
+  const habGateFail=(habitation==='partial' && !(has(4)||has(7))) || (habitation==='subsurface' && !(has(4)||has(5)));
+  const ready=selected.length===4 && Boolean(habitation) && !depFail && !habGateFail;
+  return {used,overRatio,overSoft,overHard,depFail,habGateFail,ready};
+}
+
+function renderBudget(){
+  const gate=getSubmissionGateState(S.selected,S.habitation,S.budget,S.reconfig);
+  const used=gate.used;
+  const overRatio=gate.overRatio;
+  const pct=S.budget>0?Math.min(overRatio*100,130):100;
+  const overSoft=gate.overSoft;
+  const overHard=gate.overHard;
+  const depFail=gate.depFail;
+  const habGateFail=gate.habGateFail;
   document.getElementById('mu-used').textContent=formatMu(used);
   document.getElementById('mu-total').textContent=formatMu(S.budget);
   document.getElementById('mu-used-eq').textContent=formatMu(used);
@@ -2048,22 +2359,19 @@ function renderBudget(){
   bar.style.width=pct+'%';
   bar.className='bud-bar'+((overSoft||overHard)?' over':'');
   const bw=document.getElementById('bud-warn');
-  if(overHard){
-    bw.style.display='flex';
-    document.getElementById('bud-warn-text').textContent='Overweight exceeds 15% limit. Submission invalid.';
-  }else if(overSoft){
-    bw.style.display='flex';
-    document.getElementById('bud-warn-text').textContent='Overweight accepted (risk). Launch/transfer may fail.';
-  }
-  else bw.style.display='none';
+  bw.style.display='flex';
+  if(overHard) document.getElementById('bud-warn-text').textContent='Overweight (>15%). Transport will fail 🚫';
+  else if(overSoft) document.getElementById('bud-warn-text').textContent='Overweight accepted (≤15%). Transport at risk ⚠️';
+  else document.getElementById('bud-warn-text').textContent='Cargo mass within limit ✅';
   const btn=document.getElementById('submit-btn');
   const note=document.getElementById('submit-note');
-  const ready=S.selected.length===4&&!overHard&&S.habitation;
-  btn.disabled=!ready;
+  btn.disabled=!gate.ready;
   if(S.selected.length<4) note.textContent=`Select ${4-S.selected.length} more item(s)`;
   else if(!S.habitation) note.textContent='Select habitation strategy';
-  else if(overHard) note.textContent='Overweight exceeds 15%';
-  else if(overSoft) note.textContent='Overweight accepted (risk)';
+  else if(depFail) note.textContent='Hydroponics requires water recycler';
+  else if(habGateFail) note.textContent='Selected habitation requires enabling item';
+  else if(overHard) note.textContent='Ready to submit (transport will fail)';
+  else if(overSoft) note.textContent='Ready to submit (transport at risk)';
   else note.textContent='Ready to submit';
 }
 
