@@ -36,6 +36,9 @@
 }
 *{margin:0;padding:0;box-sizing:border-box}
 body{background:var(--bg);color:var(--text);font-family:var(--font-body);min-height:100vh;overflow-x:hidden}
+body.app-locked{overflow:hidden;background:#0d0f16}
+body.app-locked .hdr,
+body.app-locked .main{visibility:hidden}
 
 /* ── HEADER ── */
 .hdr{background:var(--crimson);border-bottom:3px solid var(--crimson-dark);position:sticky;top:0;z-index:200}
@@ -318,14 +321,25 @@ select.inp{cursor:pointer}
 .toast.err{border-color:var(--red);border-left-color:var(--red);color:var(--red)}
 
 /* ── ACCESS GATE ── */
-.access-gate{position:fixed;inset:0;background:rgba(0,0,0,.55);z-index:3000;display:flex;align-items:center;justify-content:center;padding:16px}
-.access-card{width:760px;max-width:100%;background:#fff;border-top:4px solid var(--crimson);box-shadow:0 8px 40px rgba(0,0,0,.25);display:grid;grid-template-columns:1fr 1fr;gap:0}
+.access-gate{position:fixed;inset:0;background:radial-gradient(circle at 15% 20%, rgba(139,26,26,.35), transparent 42%),radial-gradient(circle at 82% 78%, rgba(26,74,139,.2), transparent 45%),linear-gradient(135deg,#070a12,#0d0f16 45%,#111624);z-index:3000;display:flex;align-items:center;justify-content:center;padding:16px}
+.access-gate::before{content:'';position:absolute;inset:0;background-image:linear-gradient(rgba(255,255,255,.03) 1px, transparent 1px),linear-gradient(90deg, rgba(255,255,255,.03) 1px, transparent 1px);background-size:26px 26px;opacity:.35;pointer-events:none}
+.access-gate::after{content:'';position:absolute;inset:0;background:radial-gradient(circle, transparent 45%, rgba(0,0,0,.35) 100%);pointer-events:none}
+.access-card{width:760px;max-width:100%;background:#fff;border-top:4px solid var(--crimson);box-shadow:0 8px 40px rgba(0,0,0,.25);display:grid;grid-template-columns:1fr 1fr;gap:0;position:relative;z-index:2;animation:gatein .35s ease}
 .access-col{padding:18px;border-right:1px solid var(--border)}
 .access-col:last-child{border-right:none}
 .access-title{font-family:var(--font-disp);font-size:11px;font-weight:800;letter-spacing:0.14em;text-transform:uppercase;color:var(--crimson);margin-bottom:10px}
 .access-sub{font-family:var(--font-mono);font-size:9px;color:var(--text-3);line-height:1.6;margin-bottom:10px}
 .access-msg{font-family:var(--font-mono);font-size:9px;color:var(--red);margin-top:8px;min-height:16px}
 .access-area{min-height:96px}
+.access-boot{display:none;margin-top:8px;background:#101520;border:1px solid #25344f;padding:8px 10px}
+.access-boot.active{display:block}
+.boot-row{display:flex;align-items:center;gap:7px;font-family:var(--font-mono);font-size:8px;color:#91a2bd;letter-spacing:.08em;text-transform:uppercase;padding:3px 0}
+.boot-dot{width:8px;height:8px;border:1px solid #526381;border-radius:50%;display:inline-block;position:relative;flex-shrink:0}
+.boot-row.live .boot-dot::after{content:'';position:absolute;top:1px;left:1px;right:1px;bottom:1px;border-radius:50%;background:#9fb2d8;animation:bootpulse .8s ease-in-out infinite}
+.boot-row.done{color:#74bf97}
+.boot-row.done .boot-dot{border-color:#74bf97;background:#74bf97}
+@keyframes bootpulse{0%,100%{opacity:.25;transform:scale(.6)}50%{opacity:1;transform:scale(1)}}
+@keyframes gatein{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
 
 /* ── RESPONSIVE ── */
 @media(max-width:900px){
@@ -348,7 +362,7 @@ select.inp{cursor:pointer}
 }
 </style>
 </head>
-<body>
+<body class="app-locked">
 
 <!-- ══ ACCESS GATE ══ -->
 <div class="access-gate" id="access-gate">
@@ -360,6 +374,7 @@ select.inp{cursor:pointer}
       <input class="inp" id="student-token" type="text" placeholder="e.g. TEAM-ALPHA">
       <button class="btn" id="student-enter-btn" onclick="unlockStudentAccess()" style="margin-top:10px;font-size:10px;padding:10px 16px">ENTER CLASSROOM</button>
       <div class="access-msg" id="student-access-msg"></div>
+      <div class="access-boot" id="student-boot" aria-live="polite" aria-atomic="true"></div>
     </div>
     <div class="access-col">
       <div class="access-title">Teacher Access</div>
@@ -948,6 +963,7 @@ let sessionId = 'lesson7-live';
 let firebaseReady = false;
 let db = null;
 let currentSessionRef = null;
+let studentUnlockBusy = false;
 
 // ═══════════════════════════
 // CHARTS
@@ -1244,8 +1260,55 @@ function showAccessMessage(target,msg,isErr){
   el.style.color=isErr?'var(--red)':'var(--green)';
 }
 
+function sleep(ms){
+  return new Promise((resolve)=>setTimeout(resolve,ms));
+}
+
+function setStudentUnlockBusyState(isBusy){
+  studentUnlockBusy=isBusy;
+  const btn=document.getElementById('student-enter-btn');
+  const inp=document.getElementById('student-token');
+  if(btn) btn.disabled=isBusy;
+  if(inp) inp.readOnly=isBusy;
+}
+
+function resetStudentBoot(){
+  const boot=document.getElementById('student-boot');
+  if(!boot) return;
+  boot.classList.remove('active');
+  boot.innerHTML='';
+}
+
+function buildBootRow(label,state){
+  const row=document.createElement('div');
+  row.className=`boot-row ${state||''}`.trim();
+  row.innerHTML=`<span class="boot-dot"></span><span>${label}</span>`;
+  return row;
+}
+
+async function runStudentConnectAnimation(teamId){
+  const boot=document.getElementById('student-boot');
+  if(!boot) return;
+  const steps=[
+    'Authenticating team PIN',
+    'Syncing classroom session',
+    `Loading ${teamId} mission profile`,
+    'Securing command link',
+  ];
+  boot.innerHTML='';
+  boot.classList.add('active');
+  for(const step of steps){
+    const row=buildBootRow(step,'live');
+    boot.appendChild(row);
+    await sleep(260);
+    row.className='boot-row done';
+  }
+}
+
 function enterApp(role){
   accessState.role=role;
+  document.body.classList.remove('app-locked');
+  resetStudentBoot();
   document.getElementById('access-gate').style.display='none';
   setTeacherButtonVisibility(role==='teacher');
 }
@@ -1268,6 +1331,8 @@ function unlockTeacherAccess(){
 }
 
 async function unlockStudentAccess(){
+  if(studentUnlockBusy) return;
+  resetStudentBoot();
   const token=(document.getElementById('student-token').value||'').trim().toUpperCase();
   if(!token){
     showAccessMessage('student-access-msg','Team PIN is required',true);
@@ -1278,41 +1343,52 @@ async function unlockStudentAccess(){
     return;
   }
 
-  const activeSnap=await db.ref('activeSessionId').once('value');
-  const active=normalizeSessionId(activeSnap.val()||sessionId);
-  if(!active){
-    showAccessMessage('student-access-msg','No active classroom session found',true);
-    return;
+  try{
+    const activeSnap=await db.ref('activeSessionId').once('value');
+    const active=normalizeSessionId(activeSnap.val()||sessionId);
+    if(!active){
+      showAccessMessage('student-access-msg','No active classroom session found',true);
+      return;
+    }
+
+    sessionId=active;
+    document.getElementById('session-id-input').value=sessionId;
+    const sessionSnap=await db.ref(`sessions/${sessionId}`).once('value');
+    applyRemoteState(sessionSnap.val()||{});
+    if(firebaseReady) startSessionSync();
+
+    const cfg=teacherTokenMap[token];
+    if(!cfg){
+      showAccessMessage('student-access-msg','Invalid team PIN',true);
+      return;
+    }
+    const teamId=cfg.teamId;
+    const teamBudget=parseMu(cfg.budget,12);
+
+    setStudentUnlockBusyState(true);
+    showAccessMessage('student-access-msg','PIN verified — establishing secure link...',false);
+    await runStudentConnectAnimation(teamId);
+
+    accessState={role:'student',token,teamId};
+    teacherUnlocked=false;
+    document.getElementById('pin-input').value='';
+    document.getElementById('pin-status').className='pin-status bad';
+    document.getElementById('pin-status').textContent='LOCKED';
+    document.getElementById('teacher-content').style.display='none';
+    document.getElementById('team-id').value=teamId;
+    document.getElementById('team-id').readOnly=true;
+    document.getElementById('budget-sel').value=formatMu(teamBudget);
+    document.getElementById('budget-sel').readOnly=true;
+    document.getElementById('session-id-input').readOnly=true;
+    onTeamIdChange();
+    showAccessMessage('student-access-msg',`Access granted for ${teamId}`,false);
+    enterApp('student');
+  }catch(_err){
+    showAccessMessage('student-access-msg','Connection failed. Please try again.',true);
+    resetStudentBoot();
+  }finally{
+    setStudentUnlockBusyState(false);
   }
-
-  sessionId=active;
-  document.getElementById('session-id-input').value=sessionId;
-  const sessionSnap=await db.ref(`sessions/${sessionId}`).once('value');
-  applyRemoteState(sessionSnap.val()||{});
-  if(firebaseReady) startSessionSync();
-
-  const cfg=teacherTokenMap[token];
-  if(!cfg){
-    showAccessMessage('student-access-msg','Invalid team PIN',true);
-    return;
-  }
-  const teamId=cfg.teamId;
-  const teamBudget=parseMu(cfg.budget,12);
-
-  accessState={role:'student',token,teamId};
-  teacherUnlocked=false;
-  document.getElementById('pin-input').value='';
-  document.getElementById('pin-status').className='pin-status bad';
-  document.getElementById('pin-status').textContent='LOCKED';
-  document.getElementById('teacher-content').style.display='none';
-  document.getElementById('team-id').value=teamId;
-  document.getElementById('team-id').readOnly=true;
-  document.getElementById('budget-sel').value=formatMu(teamBudget);
-  document.getElementById('budget-sel').readOnly=true;
-  document.getElementById('session-id-input').readOnly=true;
-  onTeamIdChange();
-  showAccessMessage('student-access-msg',`Access granted for ${teamId}`,false);
-  enterApp('student');
 }
 
 function onSessionIdChange(){
